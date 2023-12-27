@@ -1,0 +1,1549 @@
+---
+title: "Single-cell GSVA on Tcells"
+author: "Rosa Hernansaiz-Ballesteros, Ph.D | QuantBio, LLC"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+      self_contained: true
+      thumbnails: false
+      lightbox: true
+      gallery: false
+      theme: cosmo
+      highlight: kate
+      toc: true
+      toc_depth: 3
+      toc_float: yes
+      code_folding: show
+params:
+  seurat_scc: "~/vincent_perez/data/seurat_13Jun22_tcells_subclust_projectils.rds"
+  seurat: "~/vincent_perez/data/seurat_30May22_harmony_clusters.rds"
+  gs_file: "~/vincent_perez/data/mh.all.v0.3.symbols.gmt"
+  score: "UCell" # UCell or ssGSEA
+  prefix: "Tcells"
+  output_fig: "Subclustering/Tcells/pairwise_plots"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+# Purpose
+
+GSEA for the Tcell, DC, Macrophages and Monocytes.
+
+For T-cells, we will create the groups of analysis combining projecTILs and unsupervised clusters.
+projecTIL will be overruled when it doesn't agree with the cell cycle;
+and clustering will be overruled when the function doesn't match with the cluster.
+
+We will run the analysis for each cell type independently, 
+and try to pay special attention to the NFkB, IRF7, AP1 and TGF-B
+
+For T-cell and NK cell populations we will divide the CD4/CD8 and run ANOVA and a pairwise comparison.
+
+# Setup
+
+## Load libraries
+
+```{r lib}
+library(Seurat)
+library(data.table)
+library(janitor)
+library(limma)
+library(ggplot2)
+library(ComplexHeatmap)
+library(microViz)
+library(ProjecTILs)
+library(dplyr)
+library(SingleCellExperiment)
+library(UCell)
+library(escape)
+# library(singleCellTK)
+library(fgsea)
+library(rstatix)
+library(ggpubr)
+```
+
+## Plot setup
+
+```{r functions}
+theme_sara <- function(){
+  theme_bw(base_size=10)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+theme_sara_90 <- function() {
+  theme_bw(base_size=18)+
+    theme(axis.text.x=element_text(angle=90,hjust = 1,vjust = 0.5),
+          axis.text=element_text(color="black"),
+          panel.background=element_rect(color="black"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+```
+
+```{r plot-colors}
+Group2.cols <- rcartocolor::carto_pal(n=5, "Teal")
+Group4.cols <- rcartocolor::carto_pal(n=5, "Emrld")
+Group10.cols <- rcartocolor::carto_pal(n=5, "BurgYl")
+Group8.cols <- rcartocolor::carto_pal(n=5, "Purp")
+
+
+sample.cols <- c(Group2.cols, Group4.cols, Group8.cols, Group10.cols)
+names(sample.cols) <- c(c("770128", "770163", "770226", "770227", "770264"),
+                        c("770200", "770223", "770238","770271", "770279"),
+                        c("770174", "770184", "770225","770216", "770267"),
+                        c("770240", "770224", "770231", "770203", "770232"))
+
+
+group.cols <- c(Control=Group4.cols[[5]],
+                CpG=Group10.cols[[4]],
+                RT=Group2.cols[[1]],
+                RT_plus_CpG=Group8.cols[[1]])
+
+unikn_blueRed <- colorRampPalette(c("#324376","white","#771434"))(256)
+
+black_blue_yel <- colorRampPalette(c("black", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+black_blue_yel2 <- colorRampPalette(c("black", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+grey_blue_yel <- colorRampPalette(c("grey17", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+ref.cols <- list()
+
+ref.cols[["SingleR_ImmGen"]]  <- c(`B cells` = "#F0A0FF", 
+                                   `Basophils` = "#9370DB",
+                                    `Eosinophils`= "#B452CD",
+                                   `DC` = "#9DCC00", 
+                                   `Epithelial cells` = "#87CEFA",  
+                                   `Endothelial cells` = "#6495ED",
+                                   `Fibroblasts` = "navy",
+                                   `ILC` = "#191919", 
+                                   `Macrophages` = "#1C8356", 
+                                   `Mast cells` = "#E9Debb", 
+                                   `Monocytes` = "#81C57A", 
+                                   `Microglia` = "#EEB4B4",
+                                   `Neutrophils` = "#b10da1",
+                                   `NK cells` = "#8F7C00", 
+                                   `NKT` = "#FEAF16", 
+                                   `Others` = "gray40", 
+                                   `Stem cells` = "red", 
+                                   `Stromal cells` = "#F08080",
+                                   `T cells` = "#FE902EFF", 
+                                   `Tgd` = "#FFEE33")
+
+ref.cols[["sex"]] = c("F" = "#bada55",  "M" = "#7a8888")
+ref.cols[["phase"]] = c("G1" = "#ebd2be",  "S" = "#51cdc4",  "G2M" = "#cc0000")
+
+heatmap.colfun <- microViz::heat_palette(
+                  palette = "Lisbon",
+                  breaks = 100,
+                  range = c(0,1),
+                  sym = FALSE,
+                  rev = FALSE)
+
+ref.cols[["Major_Types"]] = c(`CD4`="#F6222E",
+                `CD8`="#3283FE",
+                `ILC`="#5A5156",
+                `Tgd`="#FFEE33",
+                Other="grey90")
+
+ref.cols[["projectils"]] = c(`CD4_NaiveLike`="#F6A1A5",
+                `CD8_EarlyActiv`="#D72000",
+                `CD8_EffectorMemory`="#172869",
+                `CD8_NaiveLike`="#1BB6AF",
+                `CD8_Tex`="#FFAD0A",
+                `CD8_Tpex`="lightblue",
+                `Other`="grey90" ,               
+                `Tfh`="#C70E7B",                
+                `Th1`="#088BBE",               
+                `Treg`="#A6E000")
+
+
+```
+
+
+# Import data
+
+```{r load-seurat}
+seurat = readRDS(params$seurat)
+
+cellSamples = FetchData(seurat,
+                  var = c("SampleID", "Group", "SingleR_ImmGen")) %>%
+  as.data.frame() %>%
+  dplyr::group_by(Group, SampleID) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::rename(n_sample = n)
+
+
+seurat_scc = readRDS(params$seurat_scc)
+
+```
+
+```{r}
+
+cols_01 <- pals::polychrome(n=seurat_scc[["RNA_snn_res.0.3"]] %>% pull() %>% levels() %>% length())
+names(cols_01) <- seurat_scc[["RNA_snn_res.0.3"]] %>% pull() %>% levels()
+cols_cluster <- c(cols_01["0"], "1_0" = "#E4E1E3", "1_1" = "#F3E5AB", cols_01[as.character(2:9)]) 
+
+
+cluster<-DimPlot(seurat_scc, group.by="RNA_snn_res.0.3_sub1.0.1") + 
+    theme_sara() +
+    scale_color_manual(values=cols_cluster)
+cluster
+
+### write to PDF
+# pdf(file = "~/vincent_perez/Chang_T_cell_clusters_UMAP.pdf",  
+#     width = 8,
+#     height = 6
+#     ) 
+# cluster
+# dev.off()
+
+tcells<-DimPlot(seurat_scc, group.by="tcell_projected_clust_filt") + 
+  theme_sara() + theme(legend.position = "bottom") +
+  scale_color_manual(values=ref.cols$projectils)
+tcells
+
+### write to PDF
+# pdf(file = "~/vincent_perez/Chang_T_cells_subtypes_UMAP.pdf",  
+#     width = 8,
+#     height = 6
+#     ) 
+# tcells
+# dev.off()
+
+# ggsave("Subclustering/Tcells/UmapProjectils.png", width=12, height=10, units="in", device="png", dpi=400)
+
+```
+
+```{r select-datasets}
+subcltr = list(cd4 = c("1_0",4,7), cd8 = c("1_1", 2, 3, 5, 9))
+
+seurat_scc@meta.data$L5_clust <- as.factor(as.character(seurat_scc@meta.data$RNA_snn_res.0.3_sub1.0.1))
+seurat_scc@meta.data$Major_T_types <- forcats::fct_collapse(seurat_scc@meta.data$L5_clust,
+                                                            CD4=subcltr$cd4,
+                                                            CD8=subcltr$cd8,
+                                                            ILC="0",
+                                                            Tgd="6",
+                                                            Other="8")
+seurat_scc@meta.data$L5_clust <- NULL
+
+```
+
+```{r}
+DimPlot(seurat_scc, group.by="Major_T_types") + 
+    theme_sara() +
+    scale_color_manual(values=ref.cols$Major_Types)
+
+# ggsave("Subclustering/Tcells/Umap_MajorTypes.png", width=12, height=10, units="in", device="png", dpi=400)
+```
+
+
+```{r load-gene-sets}
+gene_modules.list=list(Hallmark=fgsea::gmtPathways(params$gs_file))
+```
+
+```{r}
+# dir.create("Subclustering/Tcells/GSVA/", recursive = TRUE, showWarnings = FALSE)
+# dir.create("Subclustering/MoMaDC/GSVA/", recursive = TRUE, showWarnings = FALSE)
+```
+
+
+# Pairwise comparisons for T-cell and NK cells
+
+## Analysis
+
+```{r get-data}
+
+aData = FetchData(seurat_scc,
+                  var = c("Cd4", "Cd8a", "SampleID", "Group", "SingleR_ImmGen")) %>%
+  as.data.frame()
+
+dAnalysis = lapply(c("NK cells", "Cd8a", "Cd4"), function(x, df, nSamples){
+  if(x == "NK cells"){
+    df = df %>%
+      dplyr::filter(SingleR_ImmGen == x) %>%
+      dplyr::count(Group, SampleID) %>%
+      dplyr::left_join(., nSamples[, c("SampleID", "n_sample")], by = "SampleID") %>%
+      mutate(pct = n/n_sample)
+  }else{
+    df = df %>%
+      dplyr::filter(SingleR_ImmGen == "T cells")
+    if(x == "Cd8a"){
+      df = df %>%
+        dplyr::filter(Cd8a > 0) %>%
+        dplyr::count(Group, SampleID) %>%
+        dplyr::left_join(., nSamples[, c("SampleID", "n_sample")], by = "SampleID") %>%
+        mutate(pct = n/n_sample)
+    }else{
+      df = df %>%
+        dplyr::filter(Cd4 > 0) %>%
+        dplyr::count(Group, SampleID) %>%
+        dplyr::left_join(., nSamples[, c("SampleID", "n_sample")], by = "SampleID") %>%
+        mutate(pct = n/n_sample)
+    }
+  }
+  
+  return(df)
+  
+}, aData, cellSamples)
+
+names(dAnalysis) = c("NK cells", "Cd8a", "Cd4")
+```
+
+```{r }
+# stat.test <- lapply(dAnalysis, function(df){
+#   df %>% 
+#     wilcox_test(pct ~ Group) %>%
+#     add_significance()
+# }) %>%
+#   bind_rows(., .id = "Comparison")
+# 
+# stat.anova <- lapply(dAnalysis, function(df){
+#   summary(aov(pct ~ Group, data = df))
+# }) 
+
+```
+
+## Proportion plots
+
+```{r}
+
+my_comparisons <- list(c("Control", "CpG"), c("CpG", "RT"), c("RT", "RT_plus_CpG"),
+                       c("Control", "RT"), c("CpG", "RT_plus_CpG"),c("Control", "RT_plus_CpG"))
+
+names(dAnalysis) = c("NK cells", "Tcells CD8+", "Tcells Cd4+")
+barStat_prop <- lapply(names(dAnalysis), function(n, ldf, my_comparisons, ly_anova){
+  ldf[[n]] %>% 
+  ggpubr::ggbarplot(., x = "Group", y = "pct", 
+                    fill = "Group", 
+  add = c("median_q1q3", "jitter")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = group.cols) +
+  theme_sara_90() +
+  theme(legend.position="none") +
+  labs(x = NULL, y = n, fill = NULL) +
+  ggpubr::stat_compare_means(method = "wilcox.test",
+                             comparisons = my_comparisons, 
+                             hide.ns = TRUE) + #label.y = c(0.05, 0.08, 0.11, 0.14, 0.17, 0.20)
+  ggpubr::stat_compare_means(method = "anova", label.y = ly_anova[n])#
+
+}, dAnalysis, my_comparisons, c("NK cells" = 0.0235, "Tcells CD8+" = 0.24, "Tcells Cd4+" = 0.21))
+
+names(barStat_prop) = c("NKcells", "Cd8a", "Cd4")
+
+# lapply(names(barStat_prop), function(n, plt){
+#   ggsave(file.path(params$output_fig, paste0("barStat_prop_",n,".png")), 
+#          plot =plt[[n]] ,width=6, height=6, dpi=400)
+# }, barStat_prop)
+  
+```
+
+# Enrichment scores
+
+We use enrichIt from the _escape_ package to run a pseudobulk GSVA analysis.
+This function allows users to input both the single-cell RNA-sequencing counts and 
+any gene set pathways either from the stored data or from other sources. 
+The enrichment calculation itself uses the gsva R package 
+(gsva function with the ssGSEA method (Barbie et al, 2009), and the poisson distribution).
+We use 1000 genes to separate the enrichment calculation.
+
+Alternative, we also use GSVA with UCell, based on the Mann-Whitney U statistic, which is robust to dataset size and heterogeneity.
+Also much more faster.
+
+```{r enrichment-ssGSEA}
+
+# enrichment_scores = list()
+# enrichment_scores$monocytes <- escape::enrichIt(obj=subset(seurat, subset=`SingleR_ImmGen` %chin%  c("Monocytes")),
+#                                       gene.sets=gene_modules.list[["Hallmark"]],
+#                                       cores=16)
+# enrichment_scores$macrophages <- escape::enrichIt(obj=subset(seurat, subset=`SingleR_ImmGen` %chin%  c("Macrophages")),
+#                                       gene.sets=gene_modules.list[["Hallmark"]],
+#                                       cores=16)
+# enrichment_scores$dc <- escape::enrichIt(obj=subset(seurat, subset=`SingleR_ImmGen` %chin%  c("DC")),
+#                                       gene.sets=gene_modules.list[["Hallmark"]],
+#                                       cores=16)
+# enrichment_scores$tcells <- escape::enrichIt(obj=seurat_scc,
+#                                       gene.sets=gene_modules.list[["Hallmark"]],
+#                                       cores=16,)
+
+# saveRDS(enrichment_scores, "enrichment_scores_enrichIT_ssGSEA.rds")
+
+enrichment_scores<-readRDS(file="~/vincent_perez/data/enrichment_scores_enrichIT_ssGSEA.rds")
+
+```
+
+```{r add-enrichmentSSgsea-seurat}
+df <- enrichment_scores %>%
+  dplyr::bind_rows() 
+
+df <- setnames(df,
+               names(df),
+               paste0(names(df), "_","ssGSEA"))
+
+df <- df %>%
+  tibble::rownames_to_column(var = "rn")
+
+dat <- as.data.frame(seurat@meta.data)
+dat$rn <- rownames(seurat@meta.data)
+
+meta <- merge(dat, df, all.x=TRUE, by="rn")
+perm <- match(rownames(seurat@meta.data), meta$rn)
+meta <- meta[perm,]
+rownames(meta) <- meta$rn
+seurat <- AddMetaData(seurat, meta)
+```
+
+
+```{r enrichment-gsva-ucell}
+
+# tcells_gsva <- UCell::AddModuleScore_UCell(seurat_scc, 
+#                                       features=gene_modules.list[["Hallmark"]], name=NULL)
+# dc_gsva <- UCell::AddModuleScore_UCell(subset(seurat, subset=`SingleR_ImmGen` %chin%  c("DC")), 
+#                                       features=gene_modules.list[["Hallmark"]], name=NULL)
+# macro_gsva <- UCell::AddModuleScore_UCell(subset(seurat, subset=`SingleR_ImmGen` %chin%  c("Macrophages")), 
+#                                       features=gene_modules.list[["Hallmark"]], name=NULL)
+# mono_gsva <- UCell::AddModuleScore_UCell(subset(seurat, subset=`SingleR_ImmGen` %chin%  c("Monocytes")), 
+#                                       features=gene_modules.list[["Hallmark"]], name=NULL)
+
+```
+
+
+```{r add-enrichment-ucell-seurat}
+#Tcell info
+# df <- tcells_gsva@meta.data %>%
+#   dplyr::select(all_of(c("RNA_snn_res.0.3_sub1.0.1", 
+#                          "cycling.score", "cycling.score.G1_S", "cycling.score.G2_M", 
+#                          "anchor.score", "functional.cluster", "functional.cluster.conf",
+#                          "tcell_projected_clust_filt", "Major_T_types",
+#                          names(gene_modules.list[["Hallmark"]]))))
+# 
+# colnames(df)[grepl("HALLMARK_", colnames(df))] = paste0(colnames(df)[grepl("HALLMARK_", colnames(df))], "_UCell")
+# 
+# df <- df %>%
+#   tibble::rownames_to_column(var = "rn")
+# 
+# # The rest of datasets
+# aux = list(dc_gsva@meta.data,macro_gsva@meta.data, mono_gsva@meta.data) %>%
+#   dplyr::bind_rows() %>%
+#   dplyr::select(all_of(names(gene_modules.list[["Hallmark"]])))
+# 
+# aux <- setnames(aux,
+#                names(aux),
+#                paste0(names(aux), "_UCell"))
+# 
+# aux <- aux %>%
+#   tibble::rownames_to_column(var = "rn") %>%
+#   dplyr::mutate(RNA_snn_res.0.3_sub1.0.1 = NA, .after = "rn") %>%
+#   dplyr::mutate(cycling.score = NA, .after = "RNA_snn_res.0.3_sub1.0.1") %>%
+#   dplyr::mutate(cycling.score.G1_S = NA, .after = "cycling.score") %>%
+#   dplyr::mutate(cycling.score.G2_M = NA, .after = "cycling.score.G1_S") %>%
+#   dplyr::mutate(anchor.score = NA, .after = "cycling.score.G2_M") %>%
+#   dplyr::mutate(functional.cluster = NA, .after = "anchor.score") %>%
+#   dplyr::mutate(functional.cluster.conf = NA, .after = "functional.cluster") %>%
+#   dplyr::mutate(tcell_projected_clust_filt = NA, .after = "functional.cluster.conf") %>%
+#   dplyr::mutate(Major_T_types = NA, .after = "tcell_projected_clust_filt")
+# 
+# df <- df %>%
+#   dplyr::bind_rows(., aux)
+# 
+# meta <- merge(as.data.frame(seurat@meta.data), df, all.x=TRUE, by="rn")
+# perm <- match(rownames(seurat@meta.data), meta$rn)
+# meta <- meta[perm,]
+# rownames(meta) <- meta$rn
+# seurat <- AddMetaData(seurat, meta)
+# 
+# seurat$rn <- NULL
+
+# saveRDS(seurat, "seurat_30May22_harmony_clusters_ssGSEA_UCell_TcellClustProject.rds")
+seurat<-readRDS(file="~/vincent_perez/data/seurat_30May22_harmony_clusters_ssGSEA_UCell_TcellClustProject.rds")
+
+tcells_gsva <- UCell::AddModuleScore_UCell(seurat_scc, 
+                                      features=gene_modules.list[["Hallmark"]], name=NULL)
+
+# saveRDS(tcells_gsva, file="seurat_13Jun22_tcells_subclust_Ucell.rds")
+
+```
+
+```{r significant-es}
+
+res = seurat@meta.data %>%
+  dplyr::select(all_of(c("SampleID", "Group", paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA")))) %>%
+  escape::getSignificance(., group = "Group", fit = "ANOVA")
+
+```
+
+```{r}
+
+selectCols <- c("SampleID", "Group", "sex", "Phase", "SingleR_ImmGen", "Major_T_types",
+                paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"),
+                paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))
+
+dat <- seurat@meta.data %>%
+  dplyr::select(all_of(selectCols))
+
+
+ggdat = dat %>%
+  tibble::rownames_to_column(var = "id") %>%
+  tidyr::pivot_longer(cols = starts_with("HALLMARK_"), names_to = "Pathway") %>%
+  dplyr::mutate(method = case_when(grepl("_ssGSEA", Pathway) ~ "ssGSEA",
+                                   grepl("_UCell", Pathway) ~ "UCell"),
+                Pathway = gsub("_ssGSEA", "", gsub("_UCell", "", Pathway))) #%>%
+  # tidyr::pivot_wider(names_from = "method", values_from = value)
+
+ggdat2 = ggdat %>%
+  filter(SingleR_ImmGen %in% c("Monocytes", "Macrophages", "DC") | Major_T_types %in% c("CD4", "CD8")) %>%
+  dplyr::mutate(cell_type = case_when(Major_T_types == "CD4" ~ "CD4",
+                                      Major_T_types == "CD8" ~ "CD8",
+                                      is.na(Major_T_types) ~ SingleR_ImmGen))
+
+
+ggdat2%>% 
+  dplyr::filter(cell_type %in% c("Monocytes", "Macrophages", "DC", "CD4", "CD8") ) %>%
+  ggplot(., aes(y = Pathway, x = value, fill = method)) +
+  facet_grid(Group~cell_type) +
+  geom_boxplot(width=0.5, alpha=0.6) +
+  theme_sara() + 
+  scale_fill_manual(values=c("UCell" = "#e5690e", "ssGSEA" = "#642f74"))
+  
+ggdat3 = ggdat2 %>%
+  tidyr::pivot_wider(names_from = "method", values_from = value)
+
+cosa = pbapply::pblapply(c("Monocytes", "Macrophages", "DC", "CD4", "CD8"), function(x){
+  aver = ggdat3 %>%
+    dplyr::filter(cell_type == x)
+  lapply(unique(ggdat3$Pathway), function(z, x, aver){
+      aver %>%
+    dplyr::filter(Pathway == z) %>%
+    wilcox_test(ssGSEA ~ UCell) %>%
+    add_significance()
+  }, x, aver)
+
+})
+
+
+
+stat.test <- lapply(dAnalysis, function(df){
+  df %>% 
+    wilcox_test(pct ~ Group) %>%
+    add_significance()
+}) %>%
+
+  
+   p = ggplot(data=dat, aes(x=.data[[x]], y=.data[[feature]], fill=.data[[x]])) +
+  geom_violin(alpha=0.5, width=1, position="identity") + 
+  labs(y="Enrichment score", title=gsub("HALLMARK_","",feature)) +
+  geom_boxplot(width=0.5, alpha=0.6) +
+  theme_sara() + 
+  scale_fill_manual(values=cols) +
+  guides(fill = "none")
+  if (!is.na(facet)) {
+    p <- p + facet_wrap(~.data[[facet]])
+  }
+
+
+my_comparisons <- list(c("Control", "CpG"), c("CpG", "RT"), c("RT", "RT_plus_CpG"),
+                       c("Control", "RT"), c("CpG", "RT_plus_CpG"),c("Control", "RT_plus_CpG"))
+
+names(dAnalysis) = c("NK cells", "Tcells CD8+", "Tcells Cd4+")
+barStat_prop <- lapply(names(dAnalysis), function(n, ldf, my_comparisons, ly_anova){
+  ldf[[n]] %>% 
+  ggpubr::ggbarplot(., x = "Group", y = "pct", 
+                    fill = "Group", 
+  add = c("median_q1q3", "jitter")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = group.cols) +
+  theme_sara_90() +
+  theme(legend.position="none") +
+  labs(x = NULL, y = n, fill = NULL) +
+  ggpubr::stat_compare_means(method = "wilcox.test",
+                             comparisons = my_comparisons, 
+                             hide.ns = TRUE) + #label.y = c(0.05, 0.08, 0.11, 0.14, 0.17, 0.20)
+  ggpubr::stat_compare_means(method = "anova", label.y = ly_anova[n])#
+
+}, dAnalysis, my_comparisons, c("NK cells" = 0.0235, "Tcells CD8+" = 0.24, "Tcells Cd4+" = 0.21))
+
+
+```
+
+# Statistical tests
+For the statistical analysis, we will use limma, which borrows information between both genes and samples. 
+Variance for each gene is based on gene data alone and global variance across all genes. The first thing to do is to set up the model matrix and contrasts.
+
+The first step is to create data sets:<br>
+- All <br>
+- Subset to T-cell like<br>
+- Subset to macrophages<br>
+- Subset to monocytes<br>
+
+```{r}
+
+selectCols <- c("SampleID", "Group", "sex", "Phase", "SingleR_ImmGen", "Major_T_types",
+                paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"),
+                paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))
+
+dat <- seurat@meta.data %>%
+  dplyr::select(all_of(selectCols))
+  
+dat.sets <- list(Monocytes_ssGSEA=dat[dat$SingleR_ImmGen=="Monocytes",] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))),
+                 Macrophages_ssGSEA=dat[dat$SingleR_ImmGen=="Macrophages",] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))),
+                 DC_ssGSEA=dat[dat$SingleR_ImmGen=="DC",] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))),
+                 TcellCD4_ssGSEA=dat[which(dat$Major_T_types=="CD4"),] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))),
+                 TcellCD8_ssGSEA=dat[which(dat$Major_T_types=="CD8"),] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_UCell"))),
+                 
+                 Monocytes_UCell=dat[dat$SingleR_ImmGen=="Monocytes",] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"))),
+                 Macrophages_UCell=dat[dat$SingleR_ImmGen=="Macrophages",] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"))),
+                 DC_UCell=dat[dat$SingleR_ImmGen=="DC",] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"))),
+                 TcellCD4_UCell=dat[which(dat$Major_T_types=="CD4"),] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"))),
+                 TcellCD8_UCell=dat[which(dat$Major_T_types=="CD8"),] %>% 
+                   dplyr::select(!all_of(paste0(names(gene_modules.list[["Hallmark"]]), "_ssGSEA"))))
+
+```
+
+Create data set based on `r params$score`, indicated in the parameters.
+```{r}
+data.list <- lapply(dat.sets, function(df) t(df[,grep("HALLMARK", names(df))]))
+```
+
+Run models
+Models: <br>
+- ANOVA<br>
+- Pairwise<br>
+  - Control vs. RT<br>
+  - Control vs. CpG<br>
+  - Control vs RT plus CpG <br>
+  - RT plus CpG vs RT <br>
+  - RT plus CpG vs CpG<br>
+  
+```{r}
+make_model <- function(data, group_var, levels) {
+  group <- factor(data[[group_var]],  levels=levels)
+  design <- model.matrix(~0+group)
+  colnames(design) <- gsub("group", "", colnames(design))
+  contrast.matrix <- limma::makeContrasts(CpG-Control, RT-Control, RT_plus_CpG-Control,
+                                         RT_plus_CpG-RT, RT_plus_CpG-CpG,
+                                        levels=design)
+  model_info <- list(design=design, contrast.matrix=contrast.matrix)
+  return(model_info)
+}
+
+model.data <- lapply(dat.sets, function(d) make_model(data=d, 
+                                                      group_var="Group", 
+                                                      levels=c("Control", "CpG", "RT", "RT_plus_CpG")))
+fit.list <- sapply(names(data.list), 
+                   function(m) limma::lmFit(object=data.list[[m]], 
+                                            design=model.data[[m]][["design"]]),
+                   simplify=FALSE, USE.NAMES=TRUE)
+
+fit2.list <- sapply(names(fit.list), 
+                    function(f) limma::contrasts.fit(fit=fit.list[[f]],
+                                                     contrasts=model.data[[f]][["contrast.matrix"]]),
+                    simplify=FALSE, USE.NAMES=TRUE)
+
+fit2.list <- lapply(fit2.list, function(f) limma::eBayes(f))
+```
+
+Generate results table. For an ANOVA, must list all of the contrasts.
+For the pairwise comparisons, just list the contrasts that are interested in.
+
+```{r}
+contrasts.list <- list(ANOVA=c(1:5),
+                       `RT_Control`="RT - Control",
+                       `RTplusCpG_Control`="RT_plus_CpG - Control",
+                       `CpG_Control`="CpG - Control",
+                       `RTplusCpG_RT`="RT_plus_CpG - RT",
+                       `RTplusCpG_CpG`="RT_plus_CpG - CpG")
+
+results.tables <- lapply(fit2.list, 
+                         function(f) sapply(names(contrasts.list),
+                                           function(c) limma::topTable(fit=f,
+                                                                       coef=contrasts.list[[c]],
+                                                                       p.value=1, number=Inf),
+                                           simplify=FALSE, USE.NAMES=TRUE))
+```
+
+
+# Visualiations
+
+## Boxplots for pathways of interest
+Hallmark pathways of interest are:<br>
+- HALLMARK_TNFA_SIGNALING_VIA_NFKB<br>
+- HALLMARK_TGF_BETA_SIGNALING<br>
+- HALLMARK_INTERFERON_ALPHA_RESPONSE<br>
+- HALLMARK_INTERFERON_GAMMA_RESPONSE<br>
+- HALLMARK_INFLAMMATORY_RESPONSE<br>
+
+```{r}
+# dir.create("./../processedData/GSVA/Figures/")
+pathways <- c("HALLMARK_TNFA_SIGNALING_VIA_NFKB", "HALLMARK_TGF_BETA_SIGNALING", 
+         "HALLMARK_INTERFERON_ALPHA_RESPONSE", "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+         "HALLMARK_INFLAMMATORY_RESPONSE")
+names(pathways) <- gsub("HALLMARK_","",pathways)
+
+vln_box_plot <- function(dat, feature, cols, x="Group", facet=NA) {
+ p = ggplot(data=dat, aes(x=.data[[x]], y=.data[[feature]], fill=.data[[x]])) +
+  geom_violin(alpha=0.5, width=1, position="identity") + 
+  labs(y="Enrichment score", title=gsub("HALLMARK_","",feature)) +
+  geom_boxplot(width=0.5, alpha=0.6) +
+  theme_sara() + 
+  scale_fill_manual(values=cols) +
+  guides(fill = "none")
+  if (!is.na(facet)) {
+    p <- p + facet_wrap(~.data[[facet]])
+  }
+  return(p)
+}
+
+box.data = dat %>%
+  dplyr::filter(SingleR_ImmGen %in% c("Macrophages", "Monocytes", "DC") | Major_T_types %in% c("CD4", "CD8")) %>%
+  dplyr::mutate(Cell_type = dplyr::case_when(Major_T_types == "CD8" ~ "T cells CD8+",
+                                             Major_T_types == "CD4" ~ "T cells CD4+",
+                                             T ~ SingleR_ImmGen))
+  
+
+all.box.plot <- lapply(paste0(pathways[4], c("_UCell", "_ssGSEA")), function(p, bd){
+   vln_box_plot(dat=bd,
+                feature=p,
+                cols=group.cols,
+                facet="Cell_type")
+}, box.data)
+
+lapply(names(all.box.plot), function(x){
+ggsave(paste0("Subclustering/GSEA/Boxplot_", x, "_Cell_type.png"), 
+       plot=all.box.plot[[x]], width=7, 
+       height=6, units="in", device="png", dpi=400)  
+})
+
+```
+
+
+```{r}
+
+box.data = dat %>%
+  dplyr::filter(SingleR_ImmGen %in% c("Macrophages", "Monocytes", "DC") | Major_T_types %in% c("CD4", "CD8")) %>%
+  dplyr::mutate(Cell_type = dplyr::case_when(Major_T_types == "CD8" ~ "T cells CD8+",
+                                             Major_T_types == "CD4" ~ "T cells CD4+",
+                                             T ~ SingleR_ImmGen))
+  
+
+all.box.plot <- lapply(paste0(pathways[4], c("_UCell", "_ssGSEA")), function(p, bd){
+   vln_box_plot(dat=bd,
+                feature=p,
+                cols=group.cols,
+                facet="Cell_type")
+}, box.data)
+
+lapply(paste0(pathways[4], c("_UCell", "_ssGSEA")), function(x){
+ggsave(paste0("Subclustering/GSEA/Boxplot_", x, "_Cell_type.png"), 
+       plot=all.box.plot[[x]], width=7, 
+       height=6, units="in", device="png", dpi=400)  
+})
+
+```
+
+### For PROJECTils cathegories
+
+```{r}
+
+```
+
+Looking at <mark>TGF_BETA_SIGNALING</mark> as an example
+```{r, fig.width=6, fig.height=4}
+all.box.plot$TGF_BETA_SIGNALING
+```
+
+## Annotated heatmaps - by cell type {.tabset}
+
+Grid is mean score per sample for all pathways, annotate with ANOVA and pairwise comparisons
+```{r}
+hallmark_pathways <- names(gene_modules.list[["Hallmark"]])
+names(hallmark_pathways) <- gsub("HALLMARK_", "", hallmark_pathways)
+
+annotated_heatmaps <- function(set){
+  metadata.df = dat.sets[[set]] %>%
+  dplyr::select(all_of(c("SampleID","Group", "sex", "SingleR_ImmGen"))) %>%
+  unique.data.frame()
+
+mean.df <- dat.sets[[set]] %>% 
+            dplyr::group_by(SampleID) %>%
+            dplyr::summarise_at(hallmark_pathways, mean) %>% as.data.frame() %>%
+  tibble::column_to_rownames("SampleID")
+
+perm <- match(rownames(mean.df), metadata.df$SampleID)
+meta <- metadata.df[perm,]
+
+res.tables <- results.tables[[set]]
+res.tables <- lapply(res.tables, function(df) cbind(df, 
+                                                    Sig=ifelse(df$`adj.P.Val`<=0.05, "Sig", "NS"),
+                                                    Pathway=rownames(df)))
+
+res.tables <- lapply(res.tables, function(df) df[,names(df) %in% c("Pathway", "Sig")])
+res.tables <- sapply(names(res.tables), 
+                     function(n) setnames(res.tables[[n]], "Sig", n),
+                     simplify=FALSE, USE.NAMES=TRUE)
+
+sig.df <- res.tables %>% purrr::reduce(full_join, by="Pathway")
+sig.df$Pathway <- gsub("HALLMARK_", "", sig.df$Pathway)
+setcolorder(mean.df, names(pathways))
+sig.df$POI <- ifelse(sig.df$Pathway %in% names(pathways), "POI", "n")
+perm <- match(names(mean.df), sig.df$Pathway)
+sig.df <- sig.df[perm,]
+
+
+
+mat <- t(scale(mean.df))
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Group`=meta$Group,
+                                         col=list(`Group`=group.cols),
+                                        annotation_name_gp = grid::gpar(fontsize = 8))
+
+sig.cols <- c(`NS`="#f9ddda", `Nominal`="#ce78b3", `FDR`="#573b88")
+sig.cols <- c(`NS`="#f9ddda", `Sig`="magenta3")
+ra <- ComplexHeatmap::rowAnnotation(`ANOVA`=sig.df$ANOVA,
+                                    `RTplusCpG_RT`=sig.df$RTplusCpG_RT,
+                                    `RTplusCpG_CpG`=sig.df$RTplusCpG_CpG,
+                                    `RTplusCpG_Control`=sig.df$RTplusCpG_Control,
+                                    `RT_Control`=sig.df$RT_Control,
+                                    `CpG_Control`=sig.df$CpG_Control,
+                                    col=list(`ANOVA`=sig.cols,
+                                    `RTplusCpG_RT`=sig.cols,
+                                    `RTplusCpG_CpG`=sig.cols,
+                                    `RTplusCpG_Control`=sig.cols,
+                                    `RT_Control`=sig.cols,
+                                    `CpG_Control`=sig.cols),
+                                    annotation_name_gp = grid::gpar(fontsize = 8))
+  
+ch <- ComplexHeatmap::Heatmap(mat,
+                        name="Enrichment",
+                        cluster_column_slices=FALSE,
+                        column_split = factor(meta$Group, levels=names(group.cols)),
+                        row_split=factor(sig.df$POI, levels=c("POI", "n")),
+                        cluster_row_slices=FALSE,
+                        row_title = NULL,
+                        column_title=NULL,
+                        row_names_gp=grid::gpar(fontsize = 8),
+                        column_names_gp=gpar(fontsize = 8),
+                        column_gap = unit(0.5, "mm"),
+                        col = unikn_blueRed,
+                        top_annotation=ta,
+                        left_annotation=ra,
+                        show_column_names = TRUE,
+                        show_row_dend = TRUE,
+                        show_parent_dend_line = FALSE)
+
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", set, ".png")
+png(fn, width=10, height=10, units="in",res=400)
+ch
+dev.off()
+return(ch)
+} 
+
+
+```
+
+### All
+```{r, fig.width=10, fig.height=8}
+set="All"
+dat <- dat.sets[[set]]
+mean.df <- dat %>% 
+            dplyr::group_by(SampleID) %>%
+            dplyr::summarise_at(hallmark_pathways, mean) %>% as.data.frame()
+rownames(mean.df) <- mean.df$SampleID
+mean.df$SampleID <- NULL
+
+perm <- match(rownames(mean.df), metadata.df$SampleID)
+meta <- metadata.df[perm,]
+
+res.tables <- results.tables[[set]]
+res.tables <- lapply(res.tables, function(df) cbind(df, 
+                                                    Sig=ifelse(df$`adj.P.Val`<=0.05, "Sig", "NS"),
+                                                    Pathway=rownames(df)))
+
+res.tables <- lapply(res.tables, function(df) df[,names(df) %in% c("Pathway", "Sig")])
+res.tables <- sapply(names(res.tables), 
+                     function(n) setnames(res.tables[[n]], "Sig", n),
+                     simplify=FALSE, USE.NAMES=TRUE)
+
+sig.df <- res.tables %>% purrr::reduce(full_join, by="Pathway")
+sig.df$Pathway <- gsub("_UCell", "", sig.df$Pathway)
+setcolorder(mean.df, pathways)
+sig.df$POI <- ifelse(sig.df$Pathway %in% pathways, "POI", "n")
+perm <- match(names(mean.df), sig.df$Pathway)
+sig.df <- sig.df[perm,]
+
+
+
+mat <- t(scale(mean.df))
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Group`=meta$Group,
+                                         col=list(`Group`=group.cols),
+                                        annotation_name_gp = grid::gpar(fontsize = 8))
+
+sig.cols <- c(`NS`="#f9ddda", `Nominal`="#ce78b3", `FDR`="#573b88")
+sig.cols <- c(`NS`="#f9ddda", `Sig`="magenta3")
+ra <- ComplexHeatmap::rowAnnotation(`ANOVA`=sig.df$ANOVA,
+                                    `RTplusCpG_RT`=sig.df$RTplusCpG_RT,
+                                    `RTplusCpG_CpG`=sig.df$RTplusCpG_CpG,
+                                    `RTplusCpG_Control`=sig.df$RTplusCpG_Control,
+                                    `RT_Control`=sig.df$RT_Control,
+                                    `CpG_Control`=sig.df$CpG_Control,
+                                    col=list(`ANOVA`=sig.cols,
+                                    `RTplusCpG_RT`=sig.cols,
+                                    `RTplusCpG_CpG`=sig.cols,
+                                    `RTplusCpG_Control`=sig.cols,
+                                    `RT_Control`=sig.cols,
+                                    `CpG_Control`=sig.cols),
+                                    annotation_name_gp = grid::gpar(fontsize = 8),
+                                    show_legend=FALSE)
+
+sig.legend <- ComplexHeatmap::Legend(labels=c("Sig", "NS"),
+                     legend_gp = gpar(fill = c(`Sig`="magenta3",`NS`="#f9ddda")),
+                     title="FDR significance")
+  
+ch <- ComplexHeatmap::Heatmap(mat,
+                        name="Enrichment",
+                        cluster_column_slices=FALSE,
+                        column_split = factor(meta$Group, levels=names(group.cols)),
+                        row_split=factor(sig.df$POI, levels=c("POI", "n")),
+                        cluster_row_slices=FALSE,
+                        row_title = NULL,
+                        column_title=NULL,
+                        row_names_gp = grid::gpar(fontsize = 8),
+                        column_names_gp = grid::gpar(fontsize = 8),
+                        column_gap = unit(0.5, "mm"),
+                        col = unikn_blueRed,
+                        top_annotation=ta,
+                        left_annotation=ra,
+                        show_column_names = TRUE,
+                        show_row_dend = TRUE,
+                        show_parent_dend_line = FALSE)
+
+
+fn <- paste0("./../processedData/GSVA/Figures/Heatmap_", set, "_", score, ".png")
+
+png(fn, width=10, height=8, units="in", res = 400)
+draw(ch, annotation_legend_list = sig.legend)
+dev.off()
+draw(ch, annotation_legend_list = sig.legend)
+```
+
+### Monocytes
+
+```{r, fig.width=10, fig.height=8}
+set="Monocytes"
+annotated_heatmaps(set="Monocytes")
+```
+
+### Macrophages
+```{r, fig.width=10, fig.height=8}
+set="Macrophages"
+p = annotated_heatmaps(set="Macrophages")
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", set, ".png")
+png(fn, width=10, height=10, units="in",res=400)
+p
+dev.off()
+p
+
+
+```
+
+
+### DCs
+```{r, fig.width=10, fig.height=8}
+set="DC"
+p = annotated_heatmaps(set="DC")
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", set, ".png")
+png(fn, width=10, height=10, units="in",res=400)
+p
+dev.off()
+p
+
+```
+
+### T cells
+
+```{r, fig.width=10, fig.height=8}
+
+set="Tcell_CD8"
+p = annotated_heatmaps(set="Tcell_CD8")
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", set, ".png")
+png(fn, width=10, height=10, units="in",res=400)
+p
+dev.off()
+p
+
+set="Tcell_CD4"
+p = annotated_heatmaps(set="Tcell_CD4")
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", set, ".png")
+png(fn, width=10, height=10, units="in",res=400)
+p
+dev.off()
+p
+
+```
+
+## Annotated heatmaps - by pathway {.tabset}
+
+```{r}
+annotated_heatmap_pathway <- function(dat.sets, pway_score){
+  mean.list <- lapply(dat.sets, function(df) df %>% dplyr::group_by(SampleID) %>% summarise(mean=mean(.data[[pway_score]])))
+  mean.list <- sapply(names(mean.list), function(n) setnames(mean.list[[n]], "mean", n), simplify=FALSE, USE.NAMES=TRUE)
+  mean.df <- mean.list %>% purrr::reduce(full_join, by="SampleID") %>% data.frame
+  rownames(mean.df) <- mean.df$SampleID
+  mean.df$SampleID <- NULL
+
+  mat <- t(scale(mean.df))
+  
+  metadata.df = dat.sets[[1]] %>%
+    dplyr::select("SampleID", "Group", "sex", "Phase") %>%
+    unique.data.frame()
+
+  perm <- match(rownames(mean.df), metadata.df$SampleID)
+  meta <- metadata.df[perm,]
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Group`=meta$Group,
+                                        #`SampleID`=meta$SampleID,
+                                        `sex`=meta$sex,
+                                         col=list(`Group`=group.cols,
+                                                  #`SampleID` = sample.cols,
+                                                  `sex`= ref.cols$sex),
+                                        annotation_name_gp = grid::gpar(fontsize = 8))
+
+results.tables <- lapply(results.tables, function(set) lapply(set, function(df) cbind(df, Pathway=rownames(df))))
+sig.df <- data.frame(ANOVA=unlist(lapply(results.tables, function(set) set$ANOVA[set$ANOVA$Pathway==pway_score, "adj.P.Val"])),
+                     RT_Control=unlist(lapply(results.tables, function(set) set$RT_Control[set$RT_Control$Pathway==pway_score, "adj.P.Val"])),
+                     RTplusCpG_Control=unlist(lapply(results.tables, function(set) set$RTplusCpG_Control[set$RTplusCpG_Control$Pathway==pway_score, "adj.P.Val"])), 
+                     CpG_Control=unlist(lapply(results.tables, function(set) set$CpG_Control[set$CpG_Control$Pathway==pway_score, "adj.P.Val"])),
+                     RTplusCpG_RT=unlist(lapply(results.tables, function(set) set$RTplusCpG_RT[set$RTplusCpG_RT$Pathway==pway_score, "adj.P.Val"])),
+                     RTplusCpG_CpG=unlist(lapply(results.tables, function(set) set$RTplusCpG_CpG[set$RTplusCpG_CpG$Pathway==pway_score, "adj.P.Val"])))
+
+sig_set <- function(df, column) {
+  df[[column]] <- ifelse(df[[column]] <= 0.05, "Sig", "NS")
+  return(df)
+}
+
+for (cont in names(results.tables[[1]])) {
+  sig.df <- sig_set(df=sig.df, column=cont)
+}
+
+sig.cols <- c(`NS`="#f9ddda", `Sig`="magenta3")
+ra <- ComplexHeatmap::rowAnnotation(`ANOVA`=sig.df$ANOVA,
+                                    `RTplusCpG_RT`=sig.df$RTplusCpG_RT,
+                                    `RTplusCpG_CpG`=sig.df$RTplusCpG_CpG,
+                                    `RTplusCpG_Control`=sig.df$RTplusCpG_Control,
+                                    `RT_Control`=sig.df$RT_Control,
+                                    `CpG_Control`=sig.df$CpG_Control,
+                                    col=list(`ANOVA`=sig.cols,
+                                    `RTplusCpG_RT`=sig.cols,
+                                    `RTplusCpG_CpG`=sig.cols,
+                                    `RTplusCpG_Control`=sig.cols,
+                                    `RT_Control`=sig.cols,
+                                    `CpG_Control`=sig.cols),
+                                    annotation_name_gp = grid::gpar(fontsize = 8),
+                                    show_legend=FALSE)
+sig.legend <- ComplexHeatmap::Legend(labels=c("Sig", "NS"),
+                     legend_gp = gpar(fill = c(`Sig`="magenta3",`NS`="#f9ddda")),
+                     title="FDR significance")
+
+
+ch <- ComplexHeatmap::Heatmap(mat,
+                        name="Enrichment",
+                        cluster_column_slices=FALSE,
+                        column_split = factor(meta$Group, levels=names(group.cols)),
+                        row_split=factor(rownames(mat), levels=names(dat.sets)),
+                        row_title = NULL,
+                        row_names_gp = grid::gpar(fontsize = 8),
+                        column_names_gp=grid::gpar(fontsize=8),
+                        column_title=NULL,
+                        column_gap = unit(0.5, "mm"),
+                        col = unikn_blueRed,
+                        top_annotation=ta,
+                        left_annotation = ra,
+                        show_column_names = TRUE,
+                        cluster_rows = FALSE,
+                        cluster_columns = FALSE,
+                        show_parent_dend_line = FALSE) 
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway_score, ".png")
+png(fn, width=10, height=10, units="in",res=400)
+draw(ch, annotation_legend_list = sig.legend)
+ch
+dev.off()
+
+return(ch)
+}
+```
+
+### TNFA_SIGNALING_VIA_NFKB
+Rows are cell types
+```{r, width=10, height=2.5}
+pway <- "HALLMARK_TNFA_SIGNALING_VIA_NFKB"
+
+p = annotated_heatmap_pathway(pway)
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway, ".png")
+png(fn, width=10, height=2.5, units="in",res=400)
+p
+dev.off()
+p
+
+```
+
+### TGF_BETA_SIGNALING
+Rows are cell types
+```{r, width=10, height=2.5}
+pway <- "HALLMARK_TGF_BETA_SIGNALING"
+
+p = annotated_heatmap_pathway(dat.sets[grep("_ssGSEA", names(dat.sets))],pway)
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway, ".png")
+png(fn, width=10, height=2.5, units="in",res=400)
+p
+dev.off()
+p
+```
+
+### INTERFERON_ALPHA_RESPONSE
+Rows are cell types
+```{r, width=10, height=2.5}
+pway <- "HALLMARK_INTERFERON_GAMMA_RESPONSE_ssGSEA"
+p = annotated_heatmap_pathway(dat.sets[grep("_ssGSEA", names(dat.sets))], pway)
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway, ".png")
+png(fn, width=10, height=2.5, units="in",res=400)
+p
+dev.off()
+p
+
+
+pway <- "HALLMARK_INTERFERON_GAMMA_RESPONSE_UCell"
+p = annotated_heatmap_pathway(dat.sets[grep("_UCell", names(dat.sets))], pway)
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway, ".png")
+png(fn, width=10, height=2.5, units="in",res=400)
+p
+dev.off()
+p
+```
+
+
+### INTERFERON_GAMMA_RESPONSE
+Rows are cell types
+```{r, width=10, height=2.5}
+pway <- "HALLMARK_INTERFERON_GAMMA_RESPONSE_ssGSEA"
+p = annotated_heatmap_pathway(pway)
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway, ".png")
+png(fn, width=10, height=2.5, units="in",res=400)
+p
+dev.off()
+p
+```
+
+
+### INFLAMMATORY_RESPONSE
+Rows are cell types
+```{r, width=10, height=2.5}
+pway <- "HALLMARK_INFLAMMATORY_RESPONSE"
+p = annotated_heatmap_pathway(pway)
+
+fn <- paste0("Subclustering/GSEA/Heatmap_", pway, ".png")
+png(fn, width=10, height=2.5, units="in",res=400)
+p
+dev.off()
+p
+```
+
+
+## UMAP - all by group {.tabset}
+
+```{r get-cells}
+which_cells <- function(seurat, group_col_name, group_level) {
+  Idents(seurat) <- seurat@meta.data[[group_col_name]]
+  cells <- WhichCells(seurat, idents=group_level)
+  return(cells)
+}
+
+group_idents <- sapply(names(group.cols), function(g) which_cells(seurat=seurat,
+                                                                  group_col_name="Group",
+                                                                  group_level=g),
+                       simplify=FALSE, USE.NAMES = TRUE)
+
+```
+
+```{r umap-plot}
+feature_plot <- function(seurat, feature, cells, ttl=ttl, max_cutoff=NA) {
+  p <- FeaturePlot(seurat, features=feature, order=TRUE, cells=cells, pt.size = 0.5)
+  p <- p + theme_sara()
+  p <- p + scale_color_gradientn(colors=grey_blue_yel, limits=c(0, max_cutoff), oob=scales::squish, na.value=0)
+  #p <- p + scale_color_viridis_c(name=feature, option="rocket", direction=-1, limits=c(0, max_cutoff), oob=scales::squish, na.value=0)
+  p <- p + labs(title=ttl)
+  return(p)
+}
+
+seurat.pathways <- paste("HALLMARK", pathways, score, sep="_")
+names(seurat.pathways) <- seurat.pathways
+
+cutoffs <- c(`HALLMARK_TNFA_SIGNALING_VIA_NFKB_UCell`=0.4,
+             `HALLMARK_TGF_BETA_SIGNALING_UCell`=0.3,
+             `HALLMARK_INTERFERON_ALPHA_RESPONSE_UCell`=0.5,
+              `HALLMARK_INTERFERON_GAMMA_RESPONSE_UCell`=0.4,
+             `HALLMARK_INFLAMMATORY_RESPONSE_UCell`=0.25)
+
+feature_plots.list <- lapply(seurat.pathways, 
+                        function(feature) sapply(names(group_idents),
+                                              function(group) feature_plot(seurat=seurat, 
+                                                                           feature=feature,
+                                                                           cells=group_idents[[group]],
+                                                                           ttl=group,
+                                                                           max_cutoff = cutoffs[[feature]]),
+                                              simplify=FALSE, USE.NAMES = TRUE))
+
+
+
+
+
+
+grid_plots <- sapply(names(feature_plots.list), function(f) cowplot::plot_grid(feature_plots.list[[f]][[1]],
+                                                                               feature_plots.list[[f]][[2]],
+                                                                               feature_plots.list[[f]][[3]],
+                                                                               feature_plots.list[[f]][[4]],
+                                                                               nrow=2,
+                                                                               ncol=2, 
+                                                                               labels="AUTO", 
+                                                                               adjust="vh"),
+                     simplify=FALSE, USE.NAMES = TRUE)  
+  
+
+sapply(names(grid_plots), 
+       function(p) ggsave(filename=paste0("./../processedData/GSVA/Figures/UMAP_", p, "_bygroup.png"),
+                            plot=grid_plots[[p]],
+                             width=10,
+                             height=8,
+                             units="in",
+                             device="png",
+                             dpi=400),
+       simplify=FALSE, USE.NAMES=TRUE)
+
+
+
+```
+
+### TNFA_SIGNALING_VIA_NFKB
+
+```{r, fig.width=12, fig.height=10}
+pway <- "TNFA_SIGNALING_VIA_NFKB"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### TGF_BETA_SIGNALING
+```{r, fig.width=12, fig.height=10}
+pway <- "TGF_BETA_SIGNALING"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### INTERFERON_ALPHA_RESPONSE
+```{r, fig.width=12, fig.height=10}
+pway <- "INTERFERON_ALPHA_RESPONSE"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### INTERFERON_GAMMA_RESPONSE
+```{r, fig.width=12, fig.height=10}
+pway <- "INTERFERON_GAMMA_RESPONSE"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### INFLAMMATORY_RESPONSE
+```{r, fig.width=12, fig.height=10}
+pway <- "INFLAMMATORY_RESPONSE"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+## UMAP witb T cells - if time {.tabset}
+
+```{r seurat-t}
+seurat_tcells <- readRDS("./../processedData/Subclustering/Tcells/seurat_tcells.rds")
+rmv <- which(grepl("^X", names(seurat_tcells@meta.data)))
+seurat_tcells@meta.data <- seurat_tcells@meta.data[,-rmv]
+
+tcells <- rownames(seurat_tcells@meta.data)
+keep.tcells <- which(rownames(enrichment_scores) %in% tcells)
+
+es_tcells <- enrichment_scores[keep.tcells,]
+perm <- match(rownames(seurat@meta.data), rownames(es_tcells))
+es_tcells <- es_tcells[perm,]
+seurat_tcells <- AddMetaData(seurat_tcells, es_tcells)
+```
+
+```{r get-cells-t}
+
+which_cells <- function(seurat, group_col_name, group_level) {
+  Idents(seurat) <- seurat@meta.data[[group_col_name]]
+  cells <- WhichCells(seurat, idents=group_level)
+  return(cells)
+}
+
+dat <- data.frame(rn=rownames(seurat_tcells@meta.data),
+                  SampleID=seurat_tcells@meta.data$SampleID)
+
+meta <- merge(dat, metadata.df, by="SampleID", all.x=TRUE)
+perm <- match(rownames(seurat_tcells@meta.data), meta$rn)
+meta <- meta[perm,]
+seurat_tcells@meta.data$Group <- meta$Group
+
+
+group_idents <- sapply(names(group.cols), function(g) which_cells(seurat=seurat_tcells,
+                                                                  group_col_name="Group",
+                                                                  group_level=g),
+                       simplify=FALSE, USE.NAMES = TRUE)
+
+```
+
+
+```{r umap-plot-tcells}
+feature_plot <- function(seurat, feature, cells, ttl=ttl, max_cutoff=NA) {
+  p <- FeaturePlot(seurat, features=feature, order=TRUE, cells=cells, pt.size = 0.5)
+  p <- p + theme_sara()
+  p <- p + scale_color_gradientn(colors=grey_blue_yel, limits=c(0, max_cutoff), oob=scales::squish, na.value=0)
+  #p <- p + scale_color_viridis_c(name=feature, option="rocket", direction=-1, limits=c(0, max_cutoff), oob=scales::squish, na.value=0)
+  p <- p + labs(title=ttl)
+  return(p)
+}
+
+seurat.pathways <- paste("HALLMARK", pathways, score, sep="_")
+names(seurat.pathways) <- seurat.pathways
+
+cutoffs <- c(`HALLMARK_TNFA_SIGNALING_VIA_NFKB_UCell`=0.25,
+             `HALLMARK_TGF_BETA_SIGNALING_UCell`=0.2,
+             `HALLMARK_INTERFERON_ALPHA_RESPONSE_UCell`=0.4,
+              `HALLMARK_INTERFERON_GAMMA_RESPONSE_UCell`=0.3,
+             `HALLMARK_INFLAMMATORY_RESPONSE_UCell`=0.15)
+
+
+feature_plots.list <- lapply(seurat.pathways, 
+                        function(feature) sapply(names(group_idents),
+                                              function(group) feature_plot(seurat=seurat_tcells, 
+                                                                           feature=feature,
+                                                                           cells=group_idents[[group]],
+                                                                           ttl=group,
+                                                                           max_cutoff=cutoffs[[feature]]),
+                                              simplify=FALSE, USE.NAMES = TRUE))
+
+
+
+
+
+
+grid_plots <- sapply(names(feature_plots.list), function(f) cowplot::plot_grid(feature_plots.list[[f]][[1]],
+                                                                               feature_plots.list[[f]][[2]],
+                                                                               feature_plots.list[[f]][[3]],
+                                                                               feature_plots.list[[f]][[4]],
+                                                                               nrow=2,
+                                                                               ncol=2, 
+                                                                               labels="AUTO", 
+                                                                               adjust="vh"),
+                     simplify=FALSE, USE.NAMES = TRUE)  
+  
+
+sapply(names(grid_plots), 
+       function(p) ggsave(filename=paste0("./../processedData/GSVA/Figures/UMAP_", p, "_Tcells_bygroup.png"),
+                            plot=grid_plots[[p]],
+                             width=10,
+                             height=8,
+                             units="in",
+                             device="png",
+                             dpi=400),
+       simplify=FALSE, USE.NAMES=TRUE)
+
+
+
+```
+
+
+### TNFA_SIGNALING_VIA_NFKB
+
+```{r, fig.width=12, fig.height=10}
+pway <- "TNFA_SIGNALING_VIA_NFKB"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### TGF_BETA_SIGNALING
+```{r, fig.width=12, fig.height=10}
+pway <- "TGF_BETA_SIGNALING"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### INTERFERON_ALPHA_RESPONSE
+```{r, fig.width=12, fig.height=10}
+pway <- "INTERFERON_ALPHA_RESPONSE"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### INTERFERON_GAMMA_RESPONSE
+```{r, fig.width=12, fig.height=10}
+pway <- "INTERFERON_GAMMA_RESPONSE"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+### INFLAMMATORY_RESPONSE
+```{r, fig.width=12, fig.height=10}
+pway <- "INFLAMMATORY_RESPONSE"
+pway_score <- paste0("HALLMARK_", pway, "_", score )
+grid_plots[[pway_score]]
+```
+
+## T cell boxplots
+
+```{r}
+
+vln_box_plot3 <- function(dat, feature, cols, x="Group", scale="Group", facet=NA, score) {
+  means <- dat %>% dplyr::group_by(.data[[x]]) %>% summarise(mean=mean(.data[[feature]])) %>% as.data.table()
+  setorder(means, mean)
+  x.axis.order <- means$tcell_projected_clust_filt
+  p <- ggplot(data=dat, aes(x=.data[[x]], y=.data[[feature]], fill=.data[[x]]))
+  p <- p + geom_violin(alpha=0.5, width=1, position="identity", outlier.shape=NA) + labs(y="Enrichment score", title=feature)
+  p <- p + geom_boxplot(width=0.5, alpha=0.6)
+  p <- p + theme_sara() + theme(axis.title.x=element_blank(),
+                                axis.text.x=element_blank(),
+                                strip.text=element_text(size=7))
+  p <- p + scale_fill_manual(scale, values=cols)
+  p <- p + scale_x_discrete(limits=x.axis.order)
+  if (!is.na(facet)) {
+    p <- p + facet_wrap(~.data[[facet]])
+    ffn <- paste0("./../processedData/GSVA/Figures/Boxplot_Tcells_", feature, "_", score, "_", facet, ".png")
+  } else {
+    ffn <- paste0("./../processedData/GSVA/Figures/Boxplot_Tcells_", feature, "_", score, ".png")
+  }
+  ggsave(ffn, plot=p, width=6, height=3.5, units="in", device="png", dpi=400)
+  return(p)
+}
+
+
+
+tcell.cols <- c(`CD4_NaiveLike`="#F6A1A5",
+                `CD8_EarlyActiv`="#D72000",
+                `CD8_EffectorMemory`="#172869",
+                `CD8_NaiveLike`="#1BB6AF",
+                `CD8_Tex`="#FFAD0A",
+                `CD8_Tpex`="lightblue",
+                `Other`="grey90" ,               
+                `Tfh`="#C70E7B",                
+                `Th1`="#088BBE",               
+                `Treg`="#A6E000")
+
+box.data3 <- seurat_tcells@meta.data
+box.data3$Group <- NULL
+box.data3$SampleID <- unlist(tstrsplit(rownames(box.data3), "_", keep=1))
+
+meta <- merge(box.data3, metadata.df,  by="SampleID", all.x=TRUE)
+meta$rn <- rownames(box.data3)
+perm <- match(rownames(box.data3), meta$rn)
+meta <- meta[perm,]
+
+box.data3$Group <- meta$Group
+box.data3$tcell_projected_clust_filt <- factor(box.data3$tcell_projected_clust_filt,
+                                               levels=c("CD4_NaiveLike",
+                                                        "Tfh",
+                                                        "Th1",
+                                                        "CD8_NaiveLike",
+                                                        "CD8_EarlyActiv",
+                                                        "CD8_EffectorMemory",
+                                                        "CD8_Tpex",
+                                                        "CD8_Tex",
+                                                        "Treg",
+                                                        "Other"))
+
+ps <- lapply(seurat.pathways, function(p) vln_box_plot3(dat=box.data3,
+                                                     feature=p,
+                                                     cols=group.cols,
+                                                     x="Group",
+                                                     facet="tcell_projected_clust_filt",
+                                                     score=score))
+
+ps <- lapply(seurat.pathways, function(p) vln_box_plot3(dat=box.data3,
+                                                     feature=p,
+                                                     cols=tcell.cols,
+                                                     x="tcell_projected_clust_filt",
+                                                     facet=NA,
+                                                     scale="ProjecTILs type",
+                                                     score=score))
+
+```
+
+## T cell barplot - ProjecTILs
+
+```{r}
+box.data3 <- setDT(box.data3)
+box.data3[, .N, by="Group"]
+dt <- box.data3[, .N, by=c("Group", "tcell_projected_clust_filt")]
+
+dt$total_cells <- dt$Group
+dt$total_cells <- gsub("RT$", "29159", dt$total_cells, perl=TRUE)
+dt$total_cells <- gsub("RT_plus_CpG", "27056", dt$total_cells)
+dt$total_cells <- gsub("Control", "19997", dt$total_cells)
+dt$total_cells <- gsub("CpG", "17881", dt$total_cells)
+dt$total_cells <- as.numeric(dt$total_cells)
+dt <- dt[, Proportion := N/total_cells]
+
+p <- ggplot(data=dt, aes(x=Group, y=Proportion, fill=tcell_projected_clust_filt))
+p <- p + geom_col(position="stack", color="black")
+p <- p + theme_sara_90() + facet_wrap(~Group, nrow=1, scale="free_x")
+p <- p + scale_fill_manual("", values=tcell.cols)
+p <- p + labs(y="Proportion")
+p <- p + theme(axis.title.x=element_blank(),
+               axis.text=element_text(size=11),
+               axis.text.x=element_blank(),
+               legend.text=element_text(size=11),
+               legend.title=element_text(size=1),
+               axis.title.y=element_text(size=12),
+               strip.text=element_text(size=11),
+               legend.spacing.x = unit(0.5, 'cm'),
+               legend.spacing.y=unit(0.2, "cm"),
+               legend.key.size=unit(0.5, "cm"),
+               legend.position="bottom") 
+p <- p + guides(fill=guide_legend(byrow=TRUE))
+ggsave("./../processedData/GSVA/Tcells_Bar_prop.png", width=10, height=6, dpi=400)
+p
+```
+
+
+
+# Export
+
+```{r}
+results.export <- unlist(results.tables, recursive = FALSE, use.names = TRUE)
+names(results.export) <- gsub(".", "_Model_", names(results.export))
+fn <- paste0("./../results/GSVA_SingleCell_", score, ".xlsx")
+WriteXLS::WriteXLS(results.export, ExcelFileName=fn,
+                   AdjWidth = TRUE, BoldHeaderRow = TRUE)
+```
+

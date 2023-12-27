@@ -1,0 +1,582 @@
+---
+title: "December 2022 revisions"
+author: "Kim Roche"
+date: "12/11/2022"
+output: html_document
+---
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.width = 5,
+  fig.height = 4
+)
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(tidyr)
+library(magrittr)
+library(stringr)
+library(kableExtra)
+library(ProjecTILs)
+library(LaCroixColoR)
+library(cowplot)
+```
+
+Load data and ggplot2 themes.
+
+```{r}
+momac_seurat <- readRDS("~/vincent_perez/data/seurat_16Jun22_momac.rds")
+dc_seurat <- readRDS("~/vincent_perez/data/seurat_3Jun22_dc.rds")
+seurat_tcells <- readRDS("~/vincent_perez/data/seurat_6Jun22_tcells.rds")
+
+theme_sara <- function(){
+  theme_bw(base_size=10)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+theme_sara_90 <- function() {
+  theme_bw(base_size=18)+
+    theme(axis.text.x=element_text(angle=90,hjust = 1,vjust = 0.5),
+          axis.text=element_text(color="black"),
+          panel.background=element_rect(color="black"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+```
+
+Visualize the subclustering coarsest resolution subclustering (0.35) which 
+splits former cluster 1.
+
+```{r, fig.height = 3, fig.width = 4}
+# Dummy plot; save the legend from this one
+p <- ggplot(data.frame(x = seurat_tcells@reductions$umap@cell.embeddings[,1],
+                  y = seurat_tcells@reductions$umap@cell.embeddings[,2],
+                  cluster = seurat_tcells@meta.data$RNA_snn_res.0.35),
+       aes(x = x, y = y, fill = cluster)) +
+  geom_point(size = 4, shape = 21) +
+  theme_sara() +
+  scale_fill_manual(values = lacroix_palette(type = "paired")) +
+  labs(fill = "Cluster")
+
+legend <- get_legend(p)
+
+p <- ggplot(data.frame(x = seurat_tcells@reductions$umap@cell.embeddings[,1],
+                  y = seurat_tcells@reductions$umap@cell.embeddings[,2],
+                  cluster = seurat_tcells@meta.data$RNA_snn_res.0.35),
+       aes(x = x, y = y, fill = cluster)) +
+  geom_point(size = 2, shape = 21) +
+  theme_sara() +
+  scale_fill_manual(values = lacroix_palette(type = "paired")) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "none")
+
+plot_grid(p, legend, ncol = 2, rel_widths = c(1,0.25))
+```
+
+Recreate the T-cell subtype prediction following Rosa's code in 
+`2022_05_31_Subclustering_MoMacDC_Harmony.Rmd`. This uses a package called
+ProjecTILs, available on Github.
+
+```{r}
+ref <- ProjecTILs::load.reference.map()
+
+# tcell_filt.projected <- ProjecTILs::make.projection(seurat_tcells, ref=ref, filter.cells=TRUE)
+# tcell_filt.projected <- ProjecTILs::cellstate.predict(ref=ref, query=tcell_filt.projected)
+# 
+# mapping <- data.frame(sample_name = rownames(seurat_tcells@meta.data),
+#                       index = 1:nrow(seurat_tcells@meta.data)) %>%
+#   left_join(data.frame(sample_name = names(tcell_filt.projected$functional.cluster),
+#                        value = unname(tcell_filt.projected$functional.cluster)),
+#             by = "sample_name")
+# mapping$value[is.na(mapping$value)] <- "Other"
+# seurat_tcells@meta.data$functional.cluster <- mapping$value
+
+### Write to disk
+# readr::write_rds(seurat_tcells, file="~/vincent_perez/data/seurat_12_11_tcells_projectils.rds")
+seurat_tcells<-readRDS(file="~/vincent_perez/data/seurat_12_11_tcells_projectils.rds")
+```
+
+Visualize the ProjecTILs labels on the UMAP embedding.
+
+```{r, fig.height = 3, fig.width = 4.25}
+# Dummy plot; save the legend from this one
+p <- ggplot(data.frame(x = seurat_tcells@reductions$umap@cell.embeddings[,1],
+                  y = seurat_tcells@reductions$umap@cell.embeddings[,2],
+                  cluster = seurat_tcells@meta.data$functional.cluster),
+       aes(x = x, y = y, fill = cluster)) +
+  geom_point(size = 4, shape = 21) +
+  theme_sara() +
+  scale_fill_manual(values = lacroix_palette(type = "paired")) +
+  labs(fill = "Cluster")
+
+legend <- get_legend(p)
+
+p <- ggplot(data.frame(x = seurat_tcells@reductions$umap@cell.embeddings[,1],
+                  y = seurat_tcells@reductions$umap@cell.embeddings[,2],
+                  cluster = seurat_tcells@meta.data$functional.cluster),
+       aes(x = x, y = y, fill = cluster)) +
+  geom_point(size = 2, shape = 21) +
+  theme_sara() +
+  scale_fill_manual(values = lacroix_palette(type = "paired")) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "none")
+
+plot_grid(p, legend, ncol = 2, rel_widths = c(1,0.25))
+```
+
+A couple of additional visuals, splitting out these classes:
+* Activated CD8+ ("CD8_EarlyActiv" and "CD8_EffectorMemory")
+* Exhausted CD8+ ("CD8_Tex")
+* Treg ("Treg")
+* Th1 ("Th1")
+* Th2 ("Tfh" ???)
+
+Visualize the ProjecTILs labels on the UMAP embedding.
+
+```{r, fig.height = 4, fig.width = 4.5}
+plot_df <- data.frame(x = seurat_tcells@reductions$umap@cell.embeddings[,1],
+                      y = seurat_tcells@reductions$umap@cell.embeddings[,2],
+                      flag = seurat_tcells@meta.data$functional.cluster %in% c("Tfh"))
+ggplot() +
+  geom_point(data = plot_df %>% filter(!flag),
+             mapping = aes(x = x, y = y),
+             size = 2, shape = 21, fill = "gray") +
+  geom_point(data = plot_df %>% filter(flag),
+             mapping = aes(x = x, y = y),
+             size = 2, shape = 21, fill = "red") +
+  theme_sara() +
+  labs(x = "UMAP 1", y = "UMAP 2", title = "Tfh (follicular helper)")
+```
+
+Let's look at how Seurat clusters and ProjecTILs labels overlap.
+
+```{r}
+table(seurat_tcells@meta.data$RNA_snn_res.0.35,
+      seurat_tcells@meta.data$functional.cluster)
+```
+
+Re-run Seurat's `FindAllMarkers()` on these *new*, finer resolution T-cell 
+clusters.
+
+```{r}
+filename <- "~/vincent_perez/data/de_tcells_res0.35_vp.csv"
+if(file.exists(filename)) {
+  markers.list <- read.table(filename, sep = ",", header = T)
+} else {
+  Idents(seurat_tcells) <- seurat_tcells@meta.data$RNA_snn_res.0.35
+  markers.list <- FindAllMarkers(seurat_tcells, 
+                                 only.pos = TRUE,
+                                 min.pct = 0.25, 
+                                 logfc.threshold = .1,
+                                 random.seed = 888)
+  
+  # Write these results out to csv files
+  # markers.list %<>%
+  #   filter(p_val_adj < 0.05) %>%
+  #   select(cluster, gene, p_val, avg_log2FC, p_val_adj) %>%
+  #   arrange(cluster, desc(avg_log2FC))
+
+  markers.list %>%
+  write.table(file = filename, quote = T, sep = ",", row.names = F)
+}
+```
+
+Visualize the top markers, per-cluster, in a ComplexHeatmap.
+
+```{r, fig.height=12, fig.width=12}
+# Optionally exclude cluster 12, with its outlier expression
+include_clusters <- 0:11
+# include_clusters <- 0:12
+
+# counts <- seurat_tcells@assays$RNA@counts
+
+# Use scaled counts instead
+obj_scaled <- ScaleData(seurat_tcells, features = rownames(seurat_tcells@assays$RNA))
+counts <- obj_scaled@assays$RNA@scale.data
+
+# counts2 <- counts
+counts2 <- counts[,seurat_tcells@meta.data$RNA_snn_res.0.35 %in% include_clusters]
+
+sorted_results_top10 <- markers.list %>%
+  filter(p_val_adj < 0.05) %>%
+  mutate(log2fc = avg_log2FC) %>%
+  group_by(cluster) %>%
+#  arrange(desc(log2fc)) %>%
+  filter(row_number() <= 10) %>%
+  ungroup() %>%
+  arrange(cluster) %>% #, desc(log2fc)) %>%
+  filter(cluster %in% include_clusters)
+
+# Summarize per-cluster expression for each gene of interest
+counts_subset <- counts2[rownames(counts2) %in% sorted_results_top10$gene,]
+counts_long <- counts_subset %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  cbind(gene = rownames(counts_subset)) %>%
+  pivot_longer(!gene, names_to = "sample_id", values_to = "counts") %>%
+  left_join(data.frame(sample_id = rownames(seurat_tcells@meta.data),
+                       cluster = seurat_tcells@meta.data$RNA_snn_res.0.35),
+            by = "sample_id") %>%
+  group_by(cluster, gene) %>%
+  summarize(mean_counts = mean(counts))
+
+counts_wide <- counts_long %>%
+  pivot_wider(id_cols = gene, names_from = "cluster", values_from = "mean_counts")
+
+# Final wrangling to get a (6 x 10) x 
+content_mat <- sorted_results_top10 %>%
+  select(cluster, gene) %>%
+  arrange(cluster, gene) %>%
+  left_join(counts_wide, by = "gene")
+row_labels <- paste0(unname(unlist(content_mat[,2])),
+                     " (cl. ",
+                     unname(unlist(content_mat[,1])),
+                     ")")
+row_labels_clusters <- paste0("cl. ", unname(unlist(content_mat[,1])))
+content_mat <- as.matrix(content_mat[,3:ncol(content_mat)])
+rownames(content_mat) <- row_labels
+# content_mat <- log2(content_mat + 1)
+column_labels <- paste("cl.", unique(sorted_results_top10$cluster))
+
+# cpalette_base <- brewer.pal(ncol(content_mat), "Dark2")
+cpalette_base <- lacroix_palette(type = "paired")[1:ncol(content_mat)]
+names(cpalette_base) <- column_labels
+
+ra <- ComplexHeatmap::rowAnnotation(`Cluster` = row_labels_clusters,
+                                    col = list(`Cluster` = cpalette_base),
+                                    show_legend = FALSE)
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster` = column_labels,
+                                        col = list(`Cluster` = cpalette_base),
+                                        show_legend = FALSE)
+
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+ht <- ComplexHeatmap::Heatmap(content_mat,
+                              name = "Normalized expression",  
+                              cluster_columns = FALSE,
+                              cluster_rows = FALSE,
+                              column_split = column_labels,
+                              row_split = row_labels_clusters,
+                              row_names_gp = grid::gpar(fontsize = 11),
+                              column_title = character(0),
+                              column_gap = unit(0.5, "mm"),
+                              col = grey_blue_yel2,
+                              top_annotation = ta,
+                              show_column_names = FALSE,
+                              row_title_rot = 0,
+                              left_annotation = ra,
+                              row_names_max_width = unit(6, "in"))
+
+# filename <- "ht_deg_tcells_res0.35_kim.png"
+# png(filename, width = 18, height = 18, units = "in", res = 300)
+ComplexHeatmap::draw(ht, merge_legend = TRUE)
+# dev.off()
+
+pdf(file="~/vincent_perez/figures/t_cell_clusters.pdf", width = 18, height = 18)
+ComplexHeatmap::draw(ht, merge_legend = TRUE)
+dev.off()
+
+```
+
+Let's look at the expression of cluster 1's not particularly strongly expressed
+or distinct markers as Seurat FeaturePlots.
+
+```{r, fig.height = 4, fig.width = 4.5}
+# Expression in raw counts
+FeaturePlot(seurat_tcells, features=c("Ccl4"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Ccl5"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Cd3d"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Cd3g"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Cd8a"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Cd8b1"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Cxcr6"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Ly6c2"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("Pdcd1"), combine=FALSE)
+FeaturePlot(seurat_tcells, features=c("S100a4"), combine=FALSE)
+
+# Super high, localized expression of HLA genes in tiny cluster 12
+# FeaturePlot(seurat_tcells, features=c("H2-Aa"), combine=FALSE)
+```
+
+Calculate the M2 module enrichment scores for the *new*, finer resolution T-cell
+clusters.
+
+```{r}
+# Tau function from Vincent
+# Note this cannot handle any NAs
+fTau <- function(x) {
+  if(all(!is.na(x))) {
+    if(min(x, na.rm=TRUE) >= 0) {
+      if(max(x)!=0){
+        x <- (1-(x/max(x)))
+        res <- sum(x, na.rm=TRUE)
+        res <- res/(length(x)-1)
+      } else {
+        res <- 0
+      }
+    } else {
+      res <- NA
+    } 
+  } else {
+    res <- NA
+  } 
+  return(res)
+}
+
+filename <- "~/vincent_perez/data/fsgsea_tcells_res0.35_kim.csv"
+cpm <- RelativeCounts(seurat_tcells@assays$RNA@counts, scale.factor = 1e6, verbose = TRUE)
+coi <- unique(seurat_tcells@meta.data$RNA_snn_res.0.35)
+if(file.exists(filename)) {
+  df <- read.table(filename, sep = ",", header = T)
+} else {
+  # ------------------------------------------------------------------------------
+  #   Calculate enrichment scores (via FGSEA) on CPM
+  # ------------------------------------------------------------------------------
+  
+  # Get pathways of interest
+  gene_modules.list <- list(M2 = fgsea::gmtPathways("~/vincent_perez/data/m2.reactome.gmt"))
+  
+  results <- NULL
+  for(cl in coi) {
+    cat(paste0("Cluster ", cl, " vs. others...\n"))
+    # Cluster A vs. others
+    # This could be parallelized but the whole rest of this chunk takes ~1 min. 20 
+    # seconds to run
+    meanA <- cpm[,seurat_tcells@meta.data$RNA_snn_res.0.35 == cl]
+    meanA <- rowMeans(meanA)
+    meanB <- cpm[,seurat_tcells@meta.data$RNA_snn_res.0.35 != cl]
+    meanB <- rowMeans(meanB)
+    
+    # Eliminate any genes with really low average CPM
+    # This is 2/3 of genes (!)
+    elim <- meanA < 1 | meanB < 1
+    meanA <- meanA[!elim]
+    meanB <- meanB[!elim]
+    
+    log2fc <- log2(meanA / meanB)
+    
+    # Need to filter out modules where insufficient numbers of genes are present
+    # (at more than negligible abundance) in the CPM expression matrix
+    use_modules <- logical(length(gene_modules.list[[1]]))
+    for(i in 1:length(gene_modules.list[[1]])) {
+      if(sum(unlist(gene_modules.list[[1]][i]) %in% names(meanA)) >= 1) {
+        use_modules[i] <- TRUE
+      }
+    }
+    
+    # Try fgsea
+    res <- fgsea(gene_modules.list[[1]][use_modules], log2fc)
+    results <- rbind(results,
+                     cbind(cluster = as.character(cl),
+                           res[,1:7]))
+  }
+  
+  results$cluster <- factor(results$cluster, levels = 0:12)
+
+  # ------------------------------------------------------------------------------
+  #   Complex normalized enrichment scores (NES) with specificity (tau)
+  # ------------------------------------------------------------------------------
+  
+  min_NES <- min(results$NES, na.rm = T)
+  
+  results_tau <- results %>%
+    filter(!is.na(NES)) %>%
+    mutate(NES_positive = NES + abs(min_NES)) %>%
+    group_by(pathway) %>%
+    mutate(tau = fTau(NES_positive)) %>%
+    ungroup()
+  
+  # ------------------------------------------------------------------------------
+  #   Write out full results
+  # ------------------------------------------------------------------------------
+  
+  # All results
+  sorted_results <- results_tau %>%
+    group_by(cluster) %>%
+    # arrange(desc(NES)) %>%
+    arrange(desc(NES*tau)) %>%
+    ungroup() %>%
+    # arrange(cluster, desc(NES)) %>%
+    arrange(cluster, desc(NES*tau))
+  
+  # write.table(sorted_results, file = filename, quote = T, sep = ",", row.names = F)
+}
+```
+
+Visualize the top 10 pathways, per-cluster, in a ComplexHeatmap.
+
+```{r, fig.height=12, fig.width=12}
+# ------------------------------------------------------------------------------
+#   Pull top 10 for heatmap
+# ------------------------------------------------------------------------------
+
+sorted_results_all <- read.table(filename, sep = ",", header = T)
+sorted_results_top10 <- sorted_results_all %>%
+  group_by(cluster) %>%
+  arrange(desc(NES*tau)) %>%
+  filter(row_number() <= 10) %>%
+  ungroup() %>%
+  arrange(cluster, desc(NES*tau))
+
+# Build a table we'll write out to a .csv
+map <- data.frame(index = 1:nrow(sorted_results_top10),
+                  pathway = sorted_results_top10$pathway)
+
+content <- map %>%
+  left_join(sorted_results_all %>%
+              select(pathway, cluster, NES), by = "pathway") %>%
+  pivot_wider(id_cols = c(index, pathway), names_from = cluster, values_from = NES, names_sort = T)
+
+content_mat <- as.matrix(content[,3:ncol(content)])
+rownames(content_mat) <- sorted_results_top10$pathway
+
+df <- cbind(Cluster = rep(0:(ncol(content_mat)-1), each = 10),
+            `Top 10 gene sets` = rownames(content_mat),
+            as.data.frame(content_mat))
+rownames(df) <- NULL
+colnames(df)[3:ncol(df)] <- paste0("Cluster ", colnames(df)[3:ncol(df)], " NES")
+
+row_labels <- paste("cl.", unname(sorted_results_top10$cluster))
+column_labels <- paste("cl.", unique(sorted_results_top10$cluster))
+
+# cpalette_base <- brewer.pal(ncol(content_mat), "Dark2")
+cpalette_base <- lacroix_palette(type = "paired")[1:ncol(content_mat)]
+names(cpalette_base) <- column_labels
+
+ra <- ComplexHeatmap::rowAnnotation(`Cluster` = row_labels,
+                                    col = list(`Cluster` = cpalette_base),
+                                    show_legend = FALSE)
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster` = column_labels,
+                                        col = list(`Cluster` = cpalette_base),
+                                        show_legend = FALSE)
+
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+ht <- ComplexHeatmap::Heatmap(content_mat,
+                              name = "NES",  
+                              cluster_columns = FALSE,
+                              cluster_rows = FALSE,
+                              column_split = column_labels,
+                              row_split = row_labels,
+                              row_names_gp = grid::gpar(fontsize = 12),
+                              column_title = character(0),
+                              column_gap = unit(0.5, "mm"),
+                              col = grey_blue_yel2,
+                              top_annotation = ta,
+                              show_column_names = FALSE,
+                              row_title_rot = 0,
+                              left_annotation = ra,
+                              row_names_max_width = unit(6, "in"))
+# filename <- paste0("ht_m2_tcells_res", pieces[[1]][2], ".", pieces[[1]][3], "_kim.png")
+# png(filename, width = 22, height = 19, units = "in", res = 300)
+ComplexHeatmap::draw(ht, merge_legend = TRUE)
+# heatmap_legend_side = "bottom"
+# annotation_legend_side = "bottom"
+# dev.off()
+```
+
+Render barplots of G1/S/G2M phase proportions in each cluster for T-cells.
+
+```{r, fig.height = 3, fig.width = 6}
+
+# T-cells
+plot_df <- data.frame(cluster = seurat_tcells@meta.data$RNA_snn_res.0.35,
+                      phase = seurat_tcells@meta.data$Phase)
+
+# MoMacs
+# plot_df <- data.frame(cluster = momac_seurat@meta.data$RNA_snn_res.0.1,
+#                       phase = momac_seurat@meta.data$Phase)
+
+plot_df %>%
+  group_by(cluster) %>%
+  mutate(n_total = n()) %>%
+  ungroup() %>%
+  group_by(cluster, phase) %>%
+  mutate(n = n(),
+         p = n/n_total) %>%
+  select(cluster, phase, n, p) %>%
+  distinct() %>%
+  mutate(phase = factor(phase, levels = c("G1", "S", "G2M"))) %>%
+  ggplot(aes(x = as.factor(cluster), y = p, fill = phase)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_sara() +
+  labs(x = "Cluster", y = "Proportion", fill = "Phase")
+```
+
+Look for Chang's marker genes.
+
+```{r, fig.height = 4, fig.width = 4.5}
+# Markers for different T cell populations:
+# Activated CD8+ cells:
+# CD3+ CD8+ Tim3+ Lag3+ PD1+ TCF1+ CD44+ CD62L- Granzyme B+ IFNg+ TNFa+ IL2+
+#
+# Exhausted CD8 T cells:
+# CD3+ CD8+ Tim3+ Lag3+ PD1+ CTLA4+ BTLA+ TIGIT+ Eomes+ CD69+ CD44+ CD62L- TCF1- Granzyme B- IFNg- IL2- TNFa-
+# 
+# T regulatory cells:
+# CD3+ CD4+ CD25+ Foxp3+
+# 
+# Th1 cells:
+# CD3+ CD4+ CCR5+ CXCR3+ 
+# 
+# Th2 cells:
+# CD3+ CD4+ CXCR4+ CCR3+ CCR4+ CCR8+ 
+
+gene_names <- c("Cd3d", "Cd3e", "Cd3g",
+                "Cd8a", "Cd8b1",
+                "Havcr2",
+                "Lag3",
+                "Pdcd1",
+                "Tcf7",
+                "Cd44",
+                "Sell",
+                "Gzmb",
+                "Ifng",
+                "Il2",
+                "Tnf")
+
+gene_names <- c("Ctla4",
+                "Btla",
+                "Tigit",
+                "Eomes",
+                "Cd69")
+
+gene_names <- c("Cd4",
+                "Il2ra",
+                "Foxp3")
+
+gene_names <- c("Ccr5",
+                "Cxcr3")
+
+gene_names <- c("Cxcr4",
+                "Ccr3",
+                "Ccr4",
+                "Ccr8")
+
+# Search for gene names like ...
+# unlist(sapply(rownames(seurat_tcells@assays$RNA@counts), function(x) {
+#   grep("^Ccr8", x)
+# }))
+
+# Pull indices to check the raw counts
+# idx <- sapply(gene_names, function(x) {
+#   which(rownames(seurat_tcells@assays$RNA@counts) == x)
+# })
+# hist(unlist(seurat_tcells@assays$RNA@counts[15905,]))
+
+for(gene in gene_names) {
+  show(FeaturePlot(seurat_tcells, features=c(gene), combine=FALSE))
+}
+```
+
+

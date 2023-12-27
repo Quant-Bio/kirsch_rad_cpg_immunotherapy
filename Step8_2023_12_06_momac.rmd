@@ -1,0 +1,247 @@
+---
+title: "Consensus clustering workup"
+author: "Kim Roche"
+date: "9/13/2022"
+output: html_document
+---
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.width = 5,
+  fig.height = 4
+)
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(ggridges)
+library(caret)
+library(cowplot)
+library(tidyr)
+library(magrittr)
+library(stringr)
+library(LaCroixColoR)
+library(kableExtra)
+
+theme_sara <- function(){
+  theme_bw(base_size=18)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+palette1 <- c(rcartocolor::carto_pal(n=6, "OrYel"),
+             rcartocolor::carto_pal(n=6, "Sunset"),
+             rcartocolor::carto_pal(n=6, "Peach"),
+             rcartocolor::carto_pal(n=6, "SunsetDark"),
+             rcartocolor::carto_pal(n=6, "Purp"))
+
+### Sample color function
+get_sample_colors <- function(num_samples, palette, names) {
+  if (num_samples <= 20) {
+    sample.cols <- sample(palette, size = num_samples, replace = FALSE)
+  } else {
+    sample.cols <- colorRampPalette(palette)(num_samples)
+  }
+  names(sample.cols)<-names
+  return(sample.cols)
+}
+
+theme_sara <- function(){
+  theme_bw(base_size=18)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+theme_sara_90 <- function() {
+  theme_bw(base_size=18)+
+    theme(axis.text.x=element_text(angle=90,hjust = 1,vjust = 0.5),
+          axis.text=element_text(color="black"),
+          panel.background=element_rect(color="black"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+ref.cols <- list()
+
+ref.cols[["SingleR_ImmGen"]]  <- c(`B cells` = "#F0A0FF", 
+                                   `Basophils` = "#9370DB",
+                                    `Eosinophils`= "#B452CD",
+                                   `DC` = "#9DCC00", 
+                                   `Epithelial cells` = "#87CEFA",  
+                                   `Endothelial cells` = "#6495ED",
+                                   `Fibroblasts` = "navy",
+                                   `ILC` = "#191919", 
+                                   `Macrophages` = "#1C8356", 
+                                   `Mast cells` = "#E9Debb", 
+                                   `Monocytes` = "#81C57A", 
+                                   `Microglia` = "#EEB4B4",
+                                   `Neutrophils` = "#b10da1",
+                                   `NK cells` = "#8F7C00", 
+                                   `NKT` = "#FEAF16", 
+                                   `Others` = "gray40", 
+                                   `Stem cells` = "red", 
+                                   `Stromal cells` = "#F08080",
+                                   `T cells` = "#FE902EFF", 
+                                   `Tgd` = "#FFEE33")
+
+ref.cols[["sex"]] = c("F" = "#bada55",  "M" = "#7a8888")
+ref.cols[["phase"]] = c("G1" = "#ebd2be",  "S" = "#51cdc4",  "G2M" = "#cc0000")
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+```
+
+
+We're going to re-run the clustering on Chang's data *within* immune cell types.
+
+```{r}
+# The Harmony-adjusted but unclustered data set seems to have been deleted.
+# seurat <- readRDS("harmony/seurat_27May2022_0418UTC_10k_harmony.rds")
+
+# The subclusterings of MoMac and DC cells have already be done in:
+#   2022_06_03_Subclustering_DC.Rmd
+#   2022_06_06_Subclustering_Tcells.Rmd
+#   2022_06_16_Subclustering_MoMac.Rmd
+
+momac_seurat <- readRDS("~/rosa_hernansaiz/Chang_momacdc/seurat_16Jun22_momac.rds")
+Idents(momac_seurat)<-momac_seurat@meta.data$RNA_snn_res.0.3
+cluster.cols<-get_sample_colors(num_samples = length(unique(momac_seurat@meta.data$RNA_snn_res.0.3)),
+                                palette = palette1,
+                                names=unique(momac_seurat@meta.data$RNA_snn_res.0.3))
+
+sample.cols<-get_sample_colors(num_samples = length(unique(momac_seurat@meta.data$SampleID)),
+                                palette = palette1,
+                                names=unique(momac_seurat@meta.data$SampleID))
+group.cols=c("Control"="#535353",
+           "CpG"="#72FA79",
+           "RT"="#7A81FF",
+           "RT_plus_CpG"="#FF7E79")
+
+### Plot UMAPs
+p<-DimPlot(momac_seurat, group.by="RNA_snn_res.0.3") + 
+    theme_sara() +
+    scale_color_manual(values=cluster.cols) +
+  xlab("UMAP 1")+
+  ylab("UMAP 2")+
+  ggtitle("Monocyte and macrophage clusters")
+p
+### Print to PDF
+pdf(file = "~/vincent_perez/figures/Chang_momac_clusters_res0.3_UMAP.pdf",
+    width = 8,
+    height = 6
+    )
+p
+dev.off()
+```
+
+Check out DE here.
+
+```{r dc_cl0_de, fig.height = 7, fig.width = 9}
+### Do it manually
+# markers.list<-FindAllMarkers(momac_seurat,
+#                only.pos = TRUE,
+#                min.pct = 0.25,
+#                logfc.threshold = .1,
+#                random.seed = 888)
+# 
+# ### Write CSV
+# write.csv(markers.list, file="~/vincent_perez/data/de_momaccells_res0.3_sub_vincent.csv")
+markers.list<-read.csv(file="~/vincent_perez/data/de_momaccells_res0.3_sub_vincent.csv")
+  
+### Identify the top 6 
+top <- markers.list %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::top_n(n = 10, wt = avg_log2FC)
+top<-top[-which(top$gene %in% c("Gm42418", "Malat1","mt-Co1", "mt-Atp6", "mt-Nd2")),]
+
+### List genes
+marker.genes <- top$gene
+
+### Create mat
+seurat.hm <- subset(momac_seurat, downsample=200)
+mat <- seurat.hm[["RNA"]]@data[marker.genes, ] %>% as.matrix()
+mat <- log2(mat+1)
+
+### Create annotations and color scheme 
+clust_anno_top <- seurat.hm@meta.data$RNA_snn_res.0.3
+clust_anno_row <- factor(as.character(top$cluster), levels=c("0","1","2","3","4","5","6","7","8","9","10","11","12"))
+cols_01 <- pals::polychrome(n = length(unique(seurat.hm@meta.data$RNA_snn_res.0.3)))
+names(cols_01) <- unique(seurat.hm@meta.data$RNA_snn_res.0.3)
+  
+ra <- ComplexHeatmap::rowAnnotation(`Cluster`=clust_anno_row,
+                                      col=list(`Cluster`=cols_01),
+                                      show_legend=FALSE)
+  
+ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster`=clust_anno_top,
+                                          `Phase` = seurat.hm@meta.data$Phase,
+                                          `Sex` = seurat.hm@meta.data$sex,
+                                          `Sample` = seurat.hm@meta.data$SampleID,
+                                          `Group` = seurat.hm@meta.data$Group,
+                                          col=list(`Cluster`=cols_01,
+                                                   `Phase` = ref.cols$phase,
+                                                   `Sex` = ref.cols$sex,
+                                                   `Sample` = sample.cols,
+                                                   `Group` = group.cols),
+                                          show_legend=TRUE)
+  
+ht<-ComplexHeatmap::Heatmap(mat, 
+                            name = "Expression",  
+                          cluster_columns = FALSE,
+                          cluster_rows=FALSE,
+                          cluster_row_slices = FALSE,
+                          column_split=clust_anno_top,
+                          row_split = clust_anno_row,
+                          row_names_gp = grid::gpar(fontsize = 8),
+                          column_title=character(0),
+                          column_gap = unit(0.5, "mm"),
+                          col = grey_blue_yel2,
+                          top_annotation = ta,
+                          show_column_names = FALSE,
+                          left_annotation = ra)
+ht
+
+### Write to pdf
+# pdf(file="~/vincent_perez/figures/Chang_Momac_cluster_heatmap.pdf", width = 18, height = 18)
+# ComplexHeatmap::draw(ht, merge_legend = TRUE)
+# dev.off()
+```
+
+
+```{r, fig.height=6, fig.width=6}
+top<-markers.list %>% 
+    group_by(cluster) %>%
+    top_n(n=3, wt=avg_log2FC)
+
+dot<-DotPlot(momac_seurat, features = rev(unique(top$gene))) +
+  theme_sara_90() + 
+  coord_flip()
+dot
+
+# pdf(file = "~/vincent_perez/figures/Chang_Momac_dotplot.pdf",
+#     width = 7,
+#     height = 7
+#     )
+# dot
+# dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

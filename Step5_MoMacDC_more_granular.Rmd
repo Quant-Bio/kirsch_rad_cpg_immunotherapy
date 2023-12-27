@@ -1,0 +1,877 @@
+---
+title: "Subclustering, greater granularity"
+author: "Kim Roche, Ph.D.; Vincent Perez, Ph.D. | Tempus Labs Inc."
+date: "9/13/2022"
+output: html_document
+---
+
+This notebook was separated off from `2022_08_08_Visualizing_original_clustering.Rmd`
+and hasn't been re-run since then, so there may be some missing objects/variables!
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(ggridges)
+library(caret)
+library(cowplot)
+library(tidyr)
+library(magrittr)
+library(stringr)
+library(ggforce)
+library(fgsea)
+library(escape)
+library(clustree)
+library(GSVA)
+library(parallel)
+library(SingleCellExperiment)
+library(Matrix.utils)
+library(parallel)
+library(foreach)
+library(ggpubr)
+```
+
+```{r functions}
+theme_sara <- function(){
+  theme_bw(base_size=18)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+theme_sara_90 <- function() {
+  theme_bw(base_size=18)+
+    theme(axis.text.x=element_text(angle=90,hjust = 1,vjust = 0.5),
+          axis.text=element_text(color="black"),
+          panel.background=element_rect(color="black"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+```
+
+```{r plot-colors}
+Group2.cols <- rcartocolor::carto_pal(n=5, "Teal")
+Group4.cols <- rcartocolor::carto_pal(n=5, "Emrld")
+Group10.cols <- rcartocolor::carto_pal(n=5, "BurgYl")
+Group8.cols <- rcartocolor::carto_pal(n=5, "Purp")
+
+sample.cols <- c(Group2.cols, Group4.cols, Group8.cols, Group10.cols)
+names(sample.cols) <- c(c("770128", "770163", "770226", "770227", "770264"),
+                        c("770200", "770223", "770238", "770271", "770279"),
+                        c("770174", "770184", "770225", "770216", "770267"),
+                        c("770240", "770224", "770231", "770203", "770232"))
+
+group.cols <- c(RT=Group2.cols[[1]],
+                Control=Group4.cols[[5]],
+                RT_plus_CpG=Group8.cols[[1]],
+                CpG=Group10.cols[[4]])
+
+group.cols2=c("Control"="#535353",
+              "CpG"="#72FA79",
+              "RT"="#7A81FF",
+              "RT_plus_CpG"="#FF7E79")
+
+group.cols3=c("Ctl"="#535353",
+           "CpG"="#72FA79",
+           "RT"="#7A81FF",
+           "CpG+RT"="#FF7E79")
+
+unikn_blueRed <- colorRampPalette(c("#324376","white","#771434"))(256)
+
+black_blue_yel <- colorRampPalette(c("black", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+black_blue_yel2 <- colorRampPalette(c("black", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+grey_blue_yel <- colorRampPalette(c("grey17", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+
+
+ref.cols <- list()
+
+ref.cols[["SingleR_ImmGen"]]  <- c(`B cells` = "#F0A0FF", 
+                                   `Basophils` = "#9370DB",
+                                    `Eosinophils`= "#B452CD",
+                                   `DC` = "#9DCC00", 
+                                   `Epithelial cells` = "#87CEFA",  
+                                   `Endothelial cells` = "#6495ED",
+                                   `Fibroblasts` = "navy",
+                                   `ILC` = "#191919", 
+                                   `Macrophages` = "#1C8356", 
+                                   `Mast cells` = "#E9Debb", 
+                                   `Monocytes` = "#81C57A", 
+                                   `Microglia` = "#EEB4B4",
+                                   `Neutrophils` = "#b10da1",
+                                   `NK cells` = "#8F7C00", 
+                                   `NKT` = "#FEAF16", 
+                                   `Others` = "gray40", 
+                                   `Stem cells` = "red", 
+                                   `Stromal cells` = "#F08080",
+                                   `T cells` = "#FE902EFF", 
+                                   `Tgd` = "#FFEE33")
+
+ref.cols[["sex"]] = c("F" = "#bada55",  "M" = "#7a8888")
+ref.cols[["phase"]] = c("G1" = "#ebd2be",  "S" = "#51cdc4",  "G2M" = "#cc0000")
+
+heatmap.colfun <- microViz::heat_palette(
+                  palette = "Lisbon",
+                  breaks = 100,
+                  range = c(0,1),
+                  sym = FALSE,
+                  rev = FALSE)
+
+# Tau function from Vincent
+# Note this cannot handle any NAs
+fTau <- function(x) {
+  if(all(!is.na(x))) {
+    if(min(x, na.rm=TRUE) >= 0) {
+      if(max(x)!=0){
+        x <- (1-(x/max(x)))
+        res <- sum(x, na.rm=TRUE)
+        res <- res/(length(x)-1)
+      } else {
+        res <- 0
+      }
+    } else {
+      res <- NA
+    } 
+  } else {
+    res <- NA
+  } 
+  return(res)
+}
+```
+
+```{r load_data}
+load_extras <- TRUE
+# DC-specific subclusterings
+if(load_extras & !exists("sc_dendritic")) {
+  sc_dendritic <- readRDS("~/rosa_hernansaiz/Chang_momacdc/seurat_3Jun22_dc.rds")
+}
+```
+
+```{r marker_genes}
+markers_dc <- list(`Pan-DC` = c("Zbtb46"),
+                   `cDC1` = c("Xcr1", "Itgae", "Cd24a", "Wdfy4", "Clec9a"),
+                   `cDC2` = c("Itgam", "Sirpa", "S100a4"),
+                   `AM DC` = c("Ccr7", "Fscn1", "Fabp5", "Cd200"),
+                   `AI DC` = c("Ly6a", "Cxcl9", "Cxcl10"))
+
+markers_momac <- list(`Mono-CD14` = c("Fcna", "S100a9", "S100a8"),
+                      `Mono-CD16` = c("Fcgr4", "Lst1"),
+                      `Macro-INHBA` = c("Inhba", "Il1m", "Ccl4"),
+                      `Macro-NLRP3` = c("Nlrp3", "Ereg", "Il1b"),
+                      `Macro-LYVE1` = c("Lyve1", "Pltp", "Selenop"),
+                      `Macro-C1QC` = c("C1qc", "C1qa", "Apoe"))
+
+# The general resolution we'll use
+res_string <- "RNA_snn_res.0.15"
+```
+
+```{r gp_fns}
+visualize_clusters_celltypes <- function(sc, cluster_label) {
+  cell_types <- sc@meta.data$SingleR_ImmGen
+  cell_types[!(cell_types %in% c("Macrophages", "Monocytes", "DC"))] <- "Other"
+  pt <- table(Var1 = cell_types, sc@meta.data[[cluster_label]])
+  pt <- as.data.frame(pt)
+  pt$Var1 <- as.character(pt$Var1)
+  
+  show(ggplot(pt, aes(x = Var2, y = Freq, fill = Var1)) +
+         geom_col(position = "fill", width = 0.5) +
+         xlab("Cluster") +
+         ylab("Proportion") +
+         # scale_fill_manual(values = c(brewer.pal(12, "Paired"), "aquamarine3", "blueviolet", "gray")) +
+         scale_fill_manual(values = c(brewer.pal(3, "Paired"), "gray")) +
+         theme_sara() +
+         theme(legend.title = element_blank()) #+
+         # labs(title = cluster_label))
+  )
+}
+
+fit_subcluster <- function(sc,
+                           cluster_id,
+                           res,
+                           base_cluster_label) {
+  Idents(sc) <- sc@meta.data[[base_cluster_label]]
+  subcluster.name = paste0(base_cluster_label, "_sub")
+  sc <- Seurat::FindSubCluster(sc, 
+                               cluster = cluster_id, 
+                               graph.name = "RNA_snn", 
+                               resolution = res, 
+                               algorithm = 2,
+                               subcluster.name = subcluster.name)
+  return(sc)
+}
+
+render_de <- function(seurat_obj, resolution = NULL, res_string = NULL,
+                      cluster_id = NULL, file_name = NULL, palette = NULL) {
+  if(is.null(res_string)) {
+    if(is.null(resolution)) {
+      stop("Parameter 'resolution' missing!")
+    }
+    res_string <- paste0("RNA_snn_res.", resolution, ifelse(is.null(cluster_id), "", "_sub"))
+  }
+  if(!is.null(cluster_id)) {
+    include_vec <- unique(seurat_obj@meta.data[[res_string]][grepl(paste0("^", cluster_id, "_"), seurat_obj@meta.data[[res_string]])])
+    seurat_obj <- subset(x = seurat_obj, subset = !!sym(res_string) %in% include_vec)
+  }
+  Idents(seurat_obj) <- seurat_obj@meta.data[[res_string]]
+  
+  if(!is.null(file_name)) {
+    save_fn <- file_name
+  } else {
+    if(is.null(resolution)) {
+      stop("Parameter 'resolution' missing!")
+    }
+    save_fn <- paste0("de_cl", cluster_id, "_res", resolution, ".rds")
+  }
+  if(file.exists(save_fn)) {
+    markers.list <- readRDS(save_fn)
+  } else {
+    markers.list <- FindAllMarkers(seurat_obj,
+                                   only.pos = TRUE,
+                                   min.pct = 0.25, 
+                                   logfc.threshold = .1,
+                                   random.seed = 888)
+#    saveRDS(markers.list, save_fn)
+  }
+  
+  markers.list %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::top_n(n = 6, wt = avg_log2FC) -> top6
+  
+  marker.genes <- top6$gene
+  
+  # SetIdent(seurat_obj, value=res_string)
+  seurat.hm <- subset(seurat_obj, downsample=200)
+  mat <- seurat.hm[["RNA"]]@data[marker.genes, ] %>% as.matrix()
+  mat <- log2(mat+1)
+  
+  clust_anno_top <- seurat.hm@meta.data[[res_string]]
+  clust_anno_row <- as.character(top6$cluster)
+  
+  if(is.null(palette)) {
+    cols_01 <- pals::polychrome(n = length(unique(seurat_obj@meta.data[[res_string]])))
+    # if(length(cols_01) == 5) {
+    #   cols_01 <- cols_01[c(1,2,4,5,3)]
+    # }
+    names(cols_01) <- unique(seurat_obj@meta.data[[res_string]])
+  }
+  
+  ra <- ComplexHeatmap::rowAnnotation(`Cluster`=clust_anno_row,
+                                      col=list(`Cluster`=cols_01),
+                                      show_legend=FALSE)
+  
+  ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster`=clust_anno_top,
+                                          `Phase` = seurat.hm@meta.data$Phase,
+                                          `Sex` = seurat.hm@meta.data$sex,
+                                          `Sample` = seurat.hm@meta.data$SampleID,
+                                          `Group` = seurat.hm@meta.data$Group,
+                                          col=list(`Cluster`=cols_01,
+                                                   `Phase` = ref.cols$phase,
+                                                   `Sex` = ref.cols$sex,
+                                                   `Sample` = sample.cols,
+                                                   `Group` = group.cols),
+                                          show_legend=TRUE)
+  
+  ComplexHeatmap::Heatmap(mat, name = "Expression",  
+                          cluster_columns = FALSE,
+                          cluster_rows=FALSE,
+                          column_split=clust_anno_top,
+                          row_split = clust_anno_row,
+                          row_names_gp = grid::gpar(fontsize = 8),
+                          column_title=character(0),
+                          column_gap = unit(0.5, "mm"),
+                          col = grey_blue_yel2,
+                          top_annotation = ta,
+                          show_column_names = FALSE,
+                          left_annotation = ra)
+}
+```
+
+## Subclustering
+
+Recall, with SNN resolution 0.15:
+- Macrophages are roughly clusters: 0, 3, 4, 8, 13
+- Monocytes are roughly clusters: 1
+- Dendritic cells are roughly clusters: (5), 10
+
+```{r subcluster_fns}
+# colnames(sc@meta.data)
+
+# `base_cluster_label` is the name of the base SNN clustering labels to work
+# from, e.g. RNA_snn_res.0.15
+explore_subclusters <- function(sc, iteration_df, base_cluster_label,
+                                ImmGen_celltype_label, plot_bars = TRUE) {
+  iteration_df$max_modularity <- NA
+  if(plot_bars) {
+    visualize_clusters_celltypes(sc, base_cluster_label)
+  }
+  for(i in 1:nrow(iteration_df)) {
+    Idents(sc) <- sc@meta.data[[base_cluster_label]]
+    subcluster.name = paste0(base_cluster_label, "_sub")
+    txt <- capture.output(sc <- Seurat::FindSubCluster(sc, 
+                                                       cluster = iteration_df$cluster[i], 
+                                                       graph.name = "RNA_snn", 
+                                                       resolution = iteration_df$resolution[i], 
+                                                       algorithm = 2,
+                                                       subcluster.name = subcluster.name))
+    iteration_df$max_modularity[i] <- as.numeric(str_match(txt[7], ".*?: (.*?)$")[1,2])
+    if(plot_bars) {
+      visualize_clusters_celltypes(sc, subcluster.name)
+    }
+  }
+  return(iteration_df)
+}
+
+# Some additional visualizations for subclustering of interest
+subcluster_UMAP <- function(sc_sub,
+                            cluster_id,
+                            res,
+                            base_cluster_label,
+                            ImmGen_celltype_label) {
+  subcluster.name = paste0(base_cluster_label, "_sub")
+  
+  
+  label_cl <- sc_sub@meta.data[[subcluster.name]]
+  cluster_of_interest <- label_cl == cluster_id |
+    grepl(paste0("^", cluster_id, "_"), label_cl)
+  x <- sc_sub@reductions$umap@cell.embeddings[cluster_of_interest,1]
+  y <- sc_sub@reductions$umap@cell.embeddings[cluster_of_interest,2]
+  label_group <- sc_sub@meta.data$Group[cluster_of_interest]
+  label_cl <- label_cl[cluster_of_interest]
+  n_col <- length(unique(label_cl))
+  
+  show(ggplot(data.frame(x = x, y = y, label1 = label_group, label2 = label_cl),
+              aes(x = x, y = y, color = label2)) +
+         geom_point(size = 0.75) +
+         facet_wrap(. ~ label1) +
+         # scale_color_manual(values = c("aquamarine3", "deeppink2", "#dddddd")) +
+         scale_color_manual(values = sample(brewer.pal(8, "Dark2"), size = n_col)) +
+         theme_sara() +
+         labs(x = "UMAP 1", y = "UMAP 2") +
+         theme(legend.title = element_blank()))
+}
+
+subcluster_DotPlot <- function(sc_sub,
+                               cluster_id,
+                               base_cluster_label,
+                               ImmGen_celltype_label) {
+  subcluster.name = paste0(base_cluster_label, "_sub")
+  label_cl <- sc_sub@meta.data[[subcluster.name]]
+  if(!is.null(cluster_id)) {
+    # Just show output for this cluster and its derivatives
+    cluster_of_interest <- label_cl == cluster_id |
+      grepl(paste0("^", cluster_id, "_"), label_cl)
+    label_cl <- label_cl[cluster_of_interest]
+  }
+  Idents(sc_sub) <- sc_sub@meta.data[[subcluster.name]]
+  if(ImmGen_celltype_label == "DC") {
+    sub_mm <- markers_dc
+  } else {
+    sub_mm <- markers_momac
+  }
+  show(DotPlot(sc_sub,
+               features = sub_mm,
+               scale = FALSE,
+               idents = unique(label_cl)) +
+         theme_sara_90() +
+         geom_point(aes(size = pct.exp), shape = 21, color = "black", stroke = 1) +
+         theme(legend.position = "bottom"))
+}
+
+subcluster_group_barplot <- function(sc_sub,
+                                     cluster_id,
+                                     base_cluster_label) {
+  groups <- sc_sub@meta.data$Group
+  subcluster.name = paste0(base_cluster_label, "_sub")
+  pt <- table(Var1 = groups, sc_sub@meta.data[[subcluster.name]])
+  pt <- as.data.frame(pt)
+  pt$Var1 <- as.character(pt$Var1)
+  
+  show(ggplot(pt, aes(x = Var2, y = Freq, fill = Var1)) +
+         geom_col(position = "fill", width = 0.5) +
+         xlab("Sample") +
+         ylab("Proportion") +
+         scale_fill_manual(values = group.cols2) +
+         # scale_fill_manual(values = c(brewer.pal(3, "Paired"), "gray")) +
+         theme_sara() +
+         theme(legend.title = element_blank()))
+}
+
+print.pval <- function(pval) {
+  sig_level <- cut(pval,
+                   breaks = c(-Inf, 0, 0.0005, 0.005, 0.05, Inf),
+                   labels = c("", "***", "**", "*", ""))
+  y <- (sig_level)
+  return(y)
+}
+
+organize_grouped_subclusters <- function(seurat_obj,
+                                         marker_list,
+                                         labels_of_interest,
+                                         res_string = "RNA_snn_res.0.15_sub",
+                                         omit_zeros = TRUE) {
+  # Global markers
+  markers_c <- stack(marker_list)
+  
+  gene_rn <- rownames(seurat_obj@assays$RNA@counts) # log-ish scale
+  subset_rna <- NULL
+  labels <- seurat_obj@meta.data[[res_string]]
+  for(i in 1:nrow(markers_c)) {
+    gene <- markers_c$values[i]
+    family <- markers_c$ind[i]
+    idx <- which(gene_rn == gene)
+    if(length(idx) > 0) {
+      expression <- seurat_obj@assays$RNA@counts[idx,]
+      sample_barcodes <- names(expression)
+      names(expression) <- NULL
+      subset_rna <- rbind(subset_rna,
+                          data.frame(gene = gene,
+                                     family = family,
+                                     label = labels,
+                                     expr = expression,
+                                     barcode = sample_barcodes))
+    }
+  }
+  
+  if(omit_zeros) {
+    # Toss counts == 0
+    subset_rna %<>%
+      filter(expr != 0)
+  }
+  
+  subset_rna %<>%
+    mutate(
+      binned_label = case_when(
+        label %in% labels_of_interest ~ label,
+        TRUE ~ "other"
+      )
+    )
+  
+  subset_rna
+}
+
+subcluster_violins <- function(seurat_obj,
+                               marker_list,
+                               labels_of_interest,
+                               res_string = "RNA_snn_res.0.15_sub",
+                               omit_zeros = TRUE,
+                               ymult = 1,
+                               pairwise_results_filename = NULL) {
+  subset_rna <- organize_grouped_subclusters(seurat_obj, marker_list,
+                                             labels_of_interest, res_string,
+                                             omit_zeros)
+  
+  subset_rna %<>%
+    mutate(fam_gene = paste0(family, " - ", gene))
+  
+  # Faceting doesn't seem to work with stat_compare_means here. So I'm making
+  # individual plots and stitching them together with cowplot's plot_grid().
+  
+  fam_genes <- sort(unique(subset_rna$fam_gene))
+  
+  subclusters <- setdiff(unique(subset_rna$binned_label), "other")
+  combos <- combn(1:length(subclusters), m = 2)
+  comparisons <- list()
+  results <- NULL
+  for(i in 1:ncol(combos)) {
+    cl1 <- subclusters[combos[1,i]]
+    cl2 <- subclusters[combos[2,i]]
+    comparisons[[i]] <- c(cl1, cl2)
+    for(j in 1:length(fam_genes)) {
+      x <- subset_rna %>%
+        filter(binned_label == cl1 & fam_gene == fam_genes[j]) %>%
+        pull(expr) %>%
+        log2()
+      y <- subset_rna %>%
+        filter(binned_label == cl2 & fam_gene == fam_genes[j]) %>%
+        pull(expr) %>%
+        log2()
+      if(length(x) > 0 & length(y) > 0) {
+        p.value <- suppressWarnings(wilcox.test(x, y))$p.value
+      } else {
+        p.value <- NaN
+      }
+      results <- rbind(results,
+                       data.frame(fam_genes =  fam_genes[j],
+                                  cluster1 = cl1,
+                                  cluster2 = cl2,
+                                  p.value = p.value))
+    }
+  }
+  # Adjust these p-values and write out
+  results$p.adj <- p.adjust(results$p.value, method = "BH")
+  results %<>%
+    dplyr::rename(`Gene set` = fam_genes)
+  if(!is.null(pairwise_results_filename)) {
+    write.csv(results,
+              file = paste0(pairwise_results_filename, ".csv"))
+  }
+  
+  plot_list <- list()
+  for(i in 1:length(fam_genes)) {
+    pl <- ggplot(subset_rna %>% filter(fam_gene == fam_genes[i]),
+                 aes(x = binned_label, y = log2(expr))) +
+      geom_violin(size = 0.5, draw_quantiles = c(0.25, 0.5, 0.75), fill = "#cccccc") +
+      facet_grid(. ~ fam_gene) +
+      stat_compare_means(aes(label = ..p.adj..),
+                         comparisons = comparisons,
+                         tip.length = 0,
+                         hide.ns = TRUE,
+                         symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1),
+                                            symbols = c("****", "***", "**", "*", "ns")),
+                         vjust = 0.75) +
+      theme_sara() +
+      labs(x = "Cluster",
+           y = "Log2 non-zero expression") +
+      ylim(c(0, ymult*max(subset_rna %>% filter(fam_gene == fam_genes[i]) %>% pull(expr) %>% log2()))) +
+      theme(legend.position = "none",
+            strip.text.x = element_text(size = 11),
+            axis.text.x = element_text(size = 11),
+            axis.text.y = element_text(size = 11),
+            axis.title.x = element_blank(),
+            axis.title.y = element_blank())
+    pl
+    plot_list[[i]] <- pl
+  }
+
+  show(suppressWarnings(plot_grid(plotlist = plot_list, ncol = 4, scale = 1)))
+}
+```
+
+
+
+
+
+
+```{r}
+# Essentially any level of resolution jumps cluster 0 up from 1 cluster to 3
+sc_dc_sub <- fit_subcluster(sc_dendritic, 0, res = 0.2, "RNA_snn_res.0.3")
+
+# saveRDS(sc_dc_sub, "seurat_25Aug22_dcsubclusters.rds")
+```
+
+```{r dc_cl0_viz, fig.height = 4, fig.width = 5}
+x <- sc_dc_sub@reductions$umap@cell.embeddings[,1]
+y <- sc_dc_sub@reductions$umap@cell.embeddings[,2]
+labels <- sc_dc_sub@meta.data$RNA_snn_res.0.3_sub
+
+# palette <- sample(brewer.pal(8, "Dark2"), size = length(unique(labels)))
+
+res_string <- "RNA_snn_res.0.3_sub"
+cols_01 <- pals::polychrome(n = length(unique(sc_dc_sub@meta.data[[res_string]])))
+names(cols_01) <- sort(unique(sc_dc_sub@meta.data[[res_string]]))
+
+dummy <- ggplot(data.frame(x = x, y = y, label = labels), aes(x = x, y = y, color = label)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = cols_01) +
+  theme_sara() +
+  labs(x = "UMAP 1", y = "UMAP 2", color = "Cluster")
+legend <- get_legend(dummy)
+
+p <- ggplot(data.frame(x = x, y = y, label = labels), aes(x = x, y = y, color = label)) +
+  geom_point(size = 1) +
+  scale_color_manual(values = cols_01) +
+  theme_sara() +
+  labs(x = "UMAP 1", y = "UMAP 2")# +
+  # theme(legend.position = "none")
+
+p2<-plot_grid(p, legend, ncol = 2, rel_widths = c(1, 0.2))
+
+### Write to pdf
+pdf(file = "~/vincent_perez/figures/Chang_DC_cell_subcluster_UMAP.pdf",
+    width = 8,
+    height = 6
+    )
+p
+dev.off
+
+### For 08/04/2023 requests
+# df<-data.frame(x = x, y = y, label = labels)
+# df$label2<-df$label
+# df$label2[grep("0_", df$label2)]<-"0"
+cluster.cols<-c("0"="#5A5156",
+        "1"="#E4E1E3",
+        "2"="#F6222E",
+        "3"="#FE00FA",
+        "4"="#16FF32")
+
+p2<-DimPlot(sc_dc_sub, 
+        reduction = "umap",
+        cols = cluster.cols) +
+  theme_sara()+
+  ggtitle("RNA_snn_res.0.3")
+p2
+
+### Print to PDF
+# pdf(file = "~/vincent_perez/Chang_UMAP_MoMacDC.pdf",  
+#     width = 8,
+#     height = 6
+#     ) 
+# p2
+# dev.off()
+
+
+### Create barplot
+### Number of cells by sample
+sc_dc_sub@meta.data$Group2<-sc_dc_sub@meta.data$Group
+sc_dc_sub@meta.data$Group2<-gsub("Control","Ctl", sc_dc_sub@meta.data$Group2)
+sc_dc_sub@meta.data$Group2<-gsub("RT_plus_CpG","CpG+RT", sc_dc_sub@meta.data$Group2)
+sc_dc_sub@meta.data$Group2<-factor(sc_dc_sub@meta.data$Group2, levels=c("Ctl","CpG","RT","CpG+RT"))
+num <- data.frame(table(sc_dc_sub@meta.data$RNA_snn_res.0.3_sub,
+                        sc_dc_sub@meta.data$Group2))
+num$Var1<-factor(num$Var1, levels=c("0_0",
+                                    "0_1",
+                                    "0_2",
+                                    "1",
+                                    "2","3","4"))
+
+p3<-ggplot(num,
+       aes(Var1,
+           Freq,
+           fill=Var2
+           )
+       ) +
+  geom_bar(position="fill", 
+           stat="identity", 
+           colour="black") +
+  theme_sara_90() +
+  #theme(legend.position = "none")+
+  scale_x_discrete("") +
+  scale_fill_manual(values=group.cols3)+
+  scale_y_continuous("Proportion")+
+  guides(fill=guide_legend(title="Treatment", ncol=1))
+p3
+
+# ### Print to PDF
+# pdf(file = "~/vincent_perez/figures/Chang_DC_treatment_barplot.pdf",
+#     width = 8,
+#     height = 6
+#     )
+# p3
+# dev.off()
+
+
+### Flip it
+num <- data.frame(table(sc_dc_sub@meta.data$Group2,
+                        sc_dc_sub@meta.data$RNA_snn_res.0.3_sub
+                        ))
+num$Var1<-factor(num$Var1, levels=c("Ctl","CpG","RT","CpG+RT"))
+
+p4<-ggplot(num,
+       aes(Var1,
+           Freq,
+           fill=Var2
+           )
+       ) +
+  geom_bar(position="fill", 
+           stat="identity", 
+           colour="black") +
+  theme_sara_90() +
+  #theme(legend.position = "none")+
+  scale_x_discrete("") +
+  scale_fill_manual(values=c("0_0"="#5A5156",
+                             "0_1"="#E4E1E3",
+                             "0_2"="#2ED9FF",
+                             "1"="#1CFFCE",
+                             "2"="#3283FE",
+                             "3"="#FE00FA",
+                             "4"="#90AD1C"))+
+  scale_y_continuous("Proportion")+
+  guides(fill=guide_legend(title="", ncol=1))
+p4
+
+### Print to PDF
+# pdf(file = "~/vincent_perez/figures/Chang_DC_cluster_barplot.pdf",
+#     width = 8,
+#     height = 6
+#     )
+# p4
+# dev.off()
+
+### Cell cycle
+phase.cols<-c("G1"="#EBD2BE",
+              "G2M"="#CC0600",
+              "S"="#51CDC4")
+num <- data.frame(table(sc_dc_sub@meta.data$RNA_snn_res.0.3_sub,
+                        sc_dc_sub@meta.data$Phase))
+num$Var1<-factor(num$Var1, levels=c("0_0",
+                                    "0_1",
+                                    "0_2",
+                                    "1",
+                                    "2","3","4"))
+
+p5<-ggplot(num,
+       aes(Var1,
+           Freq,
+           fill=Var2
+           )
+       ) +
+  geom_bar(position="fill", 
+           stat="identity", 
+           colour="black") +
+  theme_sara_90() +
+  #theme(legend.position = "none")+
+  scale_x_discrete("") +
+  scale_fill_manual(values=phase.cols)+
+  scale_y_continuous("Proportion")+
+  guides(fill=guide_legend(title="Phase", ncol=1))
+p5
+
+### Print to PDF
+# pdf(file = "~/vincent_perez/figures/Chang_DC_cellcycle_barplot.pdf",
+#     width = 8,
+#     height = 6
+#     )
+# p5
+# dev.off()
+```
+
+Check out DE here.
+
+```{r dc_cl0_de, fig.height = 7, fig.width = 9}
+render_de(sc_dc_sub, res_string = "RNA_snn_res.0.3_sub", file_name = "de_dc_res0.3_sub_kim.rds", palette = cols_01)
+
+### Do it manually
+# Idents(sc_dc_sub)<-sc_dc_sub@meta.data$RNA_snn_res.0.3_sub
+# markers.list<-FindAllMarkers(sc_dc_sub,
+#                only.pos = TRUE,
+#                min.pct = 0.25,
+#                logfc.threshold = .1,
+#                random.seed = 888)
+
+### Write CSV
+# write.csv(markers.list, file="~/vincent_perez/data/de_dendriticcells_res0.3_sub_vincent.csv")
+markers.list<-read.csv(file="~/vincent_perez/data/de_dendriticcells_res0.3_sub_vincent.csv")
+  
+### Write PDF
+markers.list %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::top_n(n = 6, wt = avg_log2FC) -> top6
+  
+marker.genes <- top6$gene
+  
+  # SetIdent(seurat_obj, value=res_string)
+  seurat.hm <- subset(sc_dc_sub, downsample=200)
+  mat <- seurat.hm[["RNA"]]@data[marker.genes, ] %>% as.matrix()
+  mat <- log2(mat+1)
+  
+  clust_anno_top <- seurat.hm@meta.data[[res_string]]
+  clust_anno_row <- as.character(top6$cluster)
+  
+  cols_01 <- pals::polychrome(n = length(unique(sc_dc_sub@meta.data[[res_string]])))
+  names(cols_01) <- unique(sc_dc_sub@meta.data[[res_string]])
+  
+  ra <- ComplexHeatmap::rowAnnotation(`Cluster`=clust_anno_row,
+                                      col=list(`Cluster`=cols_01),
+                                      show_legend=FALSE)
+  
+  ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster`=clust_anno_top,
+                                          `Phase` = seurat.hm@meta.data$Phase,
+                                          `Sex` = seurat.hm@meta.data$sex,
+                                          `Sample` = seurat.hm@meta.data$SampleID,
+                                          `Group` = seurat.hm@meta.data$Group,
+                                          col=list(`Cluster`=cols_01,
+                                                   `Phase` = ref.cols$phase,
+                                                   `Sex` = ref.cols$sex,
+                                                   `Sample` = sample.cols,
+                                                   `Group` = group.cols),
+                                          show_legend=TRUE)
+  
+ht<-ComplexHeatmap::Heatmap(mat, name = "Expression",  
+                          cluster_columns = FALSE,
+                          cluster_rows=FALSE,
+                          column_split=clust_anno_top,
+                          row_split = clust_anno_row,
+                          row_names_gp = grid::gpar(fontsize = 8),
+                          column_title=character(0),
+                          column_gap = unit(0.5, "mm"),
+                          col = grey_blue_yel2,
+                          top_annotation = ta,
+                          show_column_names = FALSE,
+                          left_annotation = ra)
+
+# pdf(file="~/vincent_perez/figures/DC_subclusters.pdf", width = 18, height = 18)
+ComplexHeatmap::draw(ht, merge_legend = TRUE)
+# dev.off()
+```
+
+
+```{r, fig.height=6, fig.width=6}
+### Establish DE list
+top<-markers.list %>% 
+    group_by(cluster) %>%
+    top_n(n=3, wt=avg_log2FC) %>%
+  arrange(cluster)
+
+### Set levels
+sc_dc_sub@meta.data$RNA_snn_res.0.3_sub<-factor(sc_dc_sub@meta.data$RNA_snn_res.0.3_sub,
+                                                levels=c('0_0','0_1','0_2','1','2','3','4'))
+Idents(sc_dc_sub)<-sc_dc_sub@meta.data$RNA_snn_res.0.3_sub
+
+### Plot only top 3 DE genes
+dot<-DotPlot(sc_dc_sub, features = rev(unique(top$gene))) +
+  theme_sara_90() + 
+  coord_flip()
+dot
+
+# pdf(file = "~/vincent_perez/figures/Chang_DC_dotplot_de_genes.pdf",
+#     width = 7,
+#     height = 7
+#     )
+# dot
+# dev.off()
+
+### First GOI list GOIs from Chang's manuscript text
+gois<-c(#'MHC-II', 
+        "Il1b", 'Cd14', 'Tnf', ### C0_0
+        'Itgae', 'Xcr1', 'Clec9a', ### C0_1
+        'Cxcl10', 'Ifit1', 'Isg15', ### C0_2 
+        'Siglech', 'Ly6c2', 'Bst2', 'Ptprcap', 'Tcf4', ### C1:
+        'Npr2', 'Ctsk', ### C2
+        'Ccl5', 'Ccr7', 'Ccl22', 'Cacnb3', ### C3
+        'Itgam') ### C4
+gois<-rev(gois)
+
+dot<-DotPlot(sc_dc_sub, features = gois) +
+  theme_sara_90() + 
+  coord_flip()
+dot
+
+# pdf(file = "~/vincent_perez/figures/Chang_DC_dotplot_select_gois.pdf",
+#     width = 7,
+#     height = 7
+#     )
+# dot
+# dev.off()
+
+### Other markers from Chang
+other<-c("H2-EB1",
+         "H2-AB1",
+         "H2-Aa",
+         "H2-DMa",
+         "H2-DMb2",
+         "H2-Oa",
+         "H2-Ob")
+
+dot<-DotPlot(sc_dc_sub, features = other) +
+  theme_sara_90() + 
+  coord_flip()
+dot
+
+# pdf(file = "~/vincent_perez/figures/Chang_DC_dotplot_select_gois2.pdf",
+#     width = 7,
+#     height = 7
+#     )
+# dot
+# dev.off()
+
+```

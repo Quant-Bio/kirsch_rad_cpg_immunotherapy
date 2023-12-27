@@ -1,0 +1,513 @@
+---
+title: "Consensus clustering workup"
+author: "Kim Roche"
+date: "9/13/2022"
+output: html_document
+---
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.width = 5,
+  fig.height = 4
+)
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(ggridges)
+library(caret)
+library(cowplot)
+library(tidyr)
+library(magrittr)
+library(stringr)
+library(LaCroixColoR)
+library(kableExtra)
+```
+
+We're going to re-run the clustering on Chang's data *within* immune cell types.
+
+```{r}
+# The Harmony-adjusted but unclustered data set seems to have been deleted.
+# seurat <- readRDS("harmony/seurat_27May2022_0418UTC_10k_harmony.rds")
+
+# The subclusterings of MoMac and DC cells have already be done in:
+#   2022_06_03_Subclustering_DC.Rmd
+#   2022_06_06_Subclustering_Tcells.Rmd
+#   2022_06_16_Subclustering_MoMac.Rmd
+
+momac_seurat <- readRDS("~/rosa_hernansaiz/Chang_momacdc/seurat_16Jun22_momac.rds")
+dc_seurat <- readRDS("~/rosa_hernansaiz/Chang_momacdc/seurat_3Jun22_dc.rds")
+tcells_seurat <- readRDS("~/rosa_hernansaiz/Chang_momacdc/seurat_6Jun22_tcells.rds")
+
+res_lists <- list(momac = c(0.1, 0.2, 0.3, 0.5, 0.8, 1.1, 1.4),
+                  dc = c(0.1, 0.2, 0.3, 0.5, 0.8, 1.1, 1.4),
+                  tcells = c(0.075, 0.1, 0.15, 0.2, 0.3, 0.35, 0.4, 0.5, 0.8))
+
+df<-data.frame("cluster"=momac_seurat@meta.data$RNA_snn_res.0.3,
+               "UMAP1"=momac_seurat@reductions$umap@cell.embeddings[,1],
+               "UMAP2"=momac_seurat@reductions$umap@cell.embeddings[,2]
+               )
+
+plot_all_clusterings <- function(df) {
+  for(i in 1:length(res_list)) {
+    coords <- df@reductions$umap@cell.embeddings
+    clusters <- df@meta.data[[paste0("RNA_snn_res.", res_list[i])]]
+    K <- length(unique(clusters))
+    title <- paste0(K, "-cluster assignment (resolution = ", res_list[i], ")")
+    
+    show(
+      
+      ggplot(df,
+                aes(x = UMAP1, y = UMAP2, fill = cluster)) +
+           geom_point(size = 2, shape = 21) +
+           theme_sara() +
+#           scale_fill_manual(values = lacroix_palette("PeachPear", n = K, type = "continuous")) +
+           labs(x = "UMAP 1", y = "UMAP 2", title = title, fill = "Cluster")
+      
+      )
+    
+  }
+}
+
+get_modularities <- function(df, res_list) {
+  iteration_df <- data.frame(res = res_list,
+                             max_modularity = NA)
+  for(i in 1:nrow(iteration_df)) {
+    txt <- capture.output(df2 <- Seurat::FindClusters(df, algorithm=2, 
+                                                      resolution=iteration_df$res[i],
+                                                      verbose=TRUE))
+    iteration_df$max_modularity[i] <- as.numeric(str_match(txt[7], ".*?: (.*?)$")[1,2])
+  }
+  iteration_df
+}
+
+theme_sara <- function(){
+  theme_bw(base_size=18)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+```
+
+Let's visualize the various resolutions here.
+
+```{r, fig.height = 4, fig.width = 4.5}
+plot_all_clusterings(momac_seurat, res_lists[["momac"]])
+res_list<-res_lists[["momac"]]
+
+for(i in 1:length(res_list)) {
+    coords <- momac_seurat@reductions$umap@cell.embeddings
+    clusters <- momac_seurat@meta.data[[paste0("RNA_snn_res.", res_list[i])]]
+    K <- length(unique(clusters))
+    title <- paste0(K, "-cluster assignment (resolution = ", res_list[i], ")")
+    show(ggplot(data.frame(x = coords[,1],
+                           y = coords[,2],
+                           label = clusters),
+                aes(x = x, y = y, fill = label)) +
+           geom_point(size = 2, shape = 21) +
+           theme_sara() +
+           scale_fill_manual(values = lacroix_palette("PeachPear", n = K, type = "continuous")) +
+           labs(x = "UMAP 1", y = "UMAP 2", title = title, fill = "Cluster"))
+  }
+
+```
+
+```{r, fig.height = 4, fig.width = 4.5}
+plot_all_clusterings(dc_seurat, res_lists[["dc"]])
+```
+
+```{r, fig.height = 4, fig.width = 4.5}
+plot_all_clusterings(tcells_seurat, res_lists[["tcells"]])
+```
+
+Re-run these clusterings to pull modularity scores for each.
+
+```{r}
+get_modularities(momac_seurat, res_lists[["momac"]])
+```
+
+```{r}
+get_modularities(dc_seurat, res_lists[["dc"]])
+```
+
+```{r}
+get_modularities(tcells_seurat, res_lists[["tcells"]])
+```
+
+Check out cell quality (read counts) in cluster 3/6 of the MoMacs.
+
+```{r, fig.height = 4, fig.width = 4}
+ggplot(momac_seurat@meta.data, aes(x = RNA_snn_res.0.1, y = nCount_RNA)) +
+  geom_boxplot() +
+  theme_sara() +
+  labs(x = "Cluster",
+       y = "Total counts")
+
+ggplot(momac_seurat@meta.data, aes(x = RNA_snn_res.0.1, y = nFeature_RNA)) +
+  geom_boxplot() +
+  theme_sara() +
+  labs(x = "Cluster",
+       y = "Total genes")
+```
+
+Finding the nearest neighbors of a randomly selected cell.
+
+```{r}
+momac_nn <- Seurat::FindNeighbors(momac_seurat, reduction="harmony", return.neighbor = TRUE)
+
+find_knn_orig <- function(k) {
+  unique_cells <- c(colnames(momac_nn)[sample(1:length(colnames(momac_nn)), size = 1)])
+  counter <- 100
+  while(length(unique_cells) < k & counter > 0) {
+    cul_de_sac <- TopNeighbors(momac_nn[["RNA.nn"]], cell = unique_cells, n = 10)
+    unique_cells <- unique(c(unique_cells, cul_de_sac))
+    counter <- counter - 1
+  }
+  unique_cells
+}
+
+find_knn <- function(k) {
+  sampled_cells <- list(sample(colnames(momac_nn), size = 1))
+  counter <- 1
+  while(length(unlist(sampled_cells)) < k & counter < 100) { # limit total iterations
+    neighbors <- TopNeighbors(momac_nn[["RNA.nn"]], cell = sampled_cells[[counter]], n = 20)
+    new_additions <- setdiff(neighbors, unlist(sampled_cells))
+    # Add as many as we need
+    n_cells_needed <- min(k - length(unlist(sampled_cells)), length(new_additions))
+    new_additions <- sample(new_additions, size = n_cells_needed)
+    sampled_cells[[counter + 1]] <- new_additions
+    counter <- counter + 1
+  }
+  unlist(sampled_cells)
+}
+```
+
+```{r, fig.height = 4, fig.width = 4}
+unique_cells <- find_knn(500)
+
+# Plot these 500
+plot_df <- data.frame(x = momac_nn@reductions$umap@cell.embeddings[,1],
+                  y = momac_nn@reductions$umap@cell.embeddings[,2],
+                  label = colnames(momac_nn) %in% unique_cells)
+ggplot() +
+  geom_point(data = plot_df %>% filter(!label),
+             mapping = aes(x = x, y = y),
+             size = 2, shape = 21, fill = "gray") +
+  geom_point(data = plot_df %>% filter(label),
+             mapping = aes(x = x, y = y),
+             size = 2, shape = 21, fill = "red") +
+  theme_sara() +
+  labs(x = "UMAP 1", y = "UMAP 2")
+```
+
+Contrast a random sampling.
+
+```{r, fig.height = 4, fig.width = 4}
+unique_cells <- sample(colnames(momac_nn), size = 1000)
+
+# Plot these 500
+plot_df <- data.frame(x = momac_nn@reductions$umap@cell.embeddings[,1],
+                  y = momac_nn@reductions$umap@cell.embeddings[,2],
+                  label = colnames(momac_nn) %in% unique_cells)
+ggplot() +
+  geom_point(data = plot_df %>% filter(!label),
+             mapping = aes(x = x, y = y),
+             size = 2, shape = 21, fill = "gray") +
+  geom_point(data = plot_df %>% filter(label),
+             mapping = aes(x = x, y = y),
+             size = 2, shape = 21, fill = "red") +
+  theme_sara() +
+  labs(x = "UMAP 1", y = "UMAP 2")
+```
+
+Look at differences in treatment group representation across clusters.
+
+Chi-squared test:
+
+```{r}
+md <- momac_seurat@meta.data[,c("Group", "RNA_snn_res.0.1")]
+colnames(md) <- c("tx_group", "cluster")
+
+obj <- table(md$tx_group, md$cluster)
+# obj <- table(sample(md$tx_group), md$cluster) # random; not significant
+obj
+
+# There is an association between treatment group proportion and cluster
+chisq.test(obj)
+```
+
+1-vs-5 model:
+
+```{r}
+# Simpler (probably bad) version
+
+coi <- unique(md$cluster)
+toi <- unique(md$tx_group)
+
+# Summary of proportions and counts per cluster x tx_group
+md %>%
+  group_by(cluster, tx_group) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  select(cluster, tx_group, n) %>%
+  distinct() %>%
+  group_by(cluster) %>%
+  mutate(n_total = sum(n)) %>%
+  ungroup() %>%
+  mutate(p = n/n_total) %>%
+  select(cluster, tx_group, p, n) %>%
+  dplyr::rename(proportion = p) -> test_df
+
+results <- NULL
+for(cluster_of_interest in coi) {
+  for(tx_of_interest in toi) {
+    # Non-parametric
+    f <- ecdf(test_df %>%
+                filter(cluster != cluster_of_interest & tx_group == tx_of_interest) %>%
+                pull(proportion))
+
+    observed_val <- test_df %>%
+      filter(cluster == cluster_of_interest & tx_group == tx_of_interest) %>%
+      pull(proportion)
+    p <- 2 * min(f(observed_val), 1 - f(observed_val)) # two tailed
+    
+    results <- rbind(results,
+                     data.frame(cluster = cluster_of_interest,
+                                tx_group = tx_of_interest,
+                                p = p))
+  }
+}
+
+results$p.adj <- p.adjust(results$p, method = "BH")
+
+results %>%
+  arrange(cluster, tx_group) %>%
+  kbl() %>%
+  kable_styling()
+```
+
+Visualizing the composition (in terms of treatment groups) of random clusters:
+
+```{r}
+counts <- md %>%
+  group_by(cluster, tx_group) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  select(cluster, tx_group, n) %>%
+  distinct()
+
+n_sample <- counts %>%
+  filter(cluster == 5) %>%
+  pull(n) %>%
+  sum()
+
+# Pull 20 truly random samples
+sampled_clusters <- NULL
+for(i in 1:20) {
+  sampled_clusters <- rbind(sampled_clusters,
+                            data.frame(cluster = i,
+                                       tx_group = md[sample(1:nrow(md), size = n_sample),]$tx_group))
+}
+
+sampled_clusters %>%
+  group_by(cluster, tx_group) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  distinct() %>%
+  ggplot(aes(x = cluster, y = n, fill = tx_group)) +
+  geom_bar(position = "stack", stat = "identity") +
+  theme_sara() +
+  labs(x = "Sampled 'cluster' (n=497)", y = "Count", fill = "Treatment group")
+
+# Pull 40 spatially sensible clusters
+sampled_clusters <- NULL
+for(i in 1:40) {
+  cell_ids <- find_knn(n_sample)
+  mapping <- data.frame(name = cell_ids) %>%
+    left_join(data.frame(name = colnames(momac_nn),
+                         index = 1:ncol(momac_nn)), by = "name")
+  tx_group <- momac_nn@meta.data$Group[mapping$index]
+  sampled_clusters <- rbind(sampled_clusters,
+                            data.frame(cluster = i,
+                                       tx_group = tx_group))
+}
+
+sampled_clusters %>%
+  group_by(cluster, tx_group) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  group_by(cluster) %>%
+  mutate(total_n = n()) %>%
+  ungroup() %>%
+  mutate(proportion = n/total_n) %>%
+  distinct() %>%
+  ggplot(aes(x = cluster, y = proportion, fill = tx_group)) +
+  geom_bar(position = "stack", stat = "identity") +
+  theme_sara() +
+  labs(x = "Sampled 'cluster'", y = "Count", fill = "Treatment group")
+```
+
+Better, bootstrapping null model:
+
+```{r}
+sample_randomly <- FALSE # randomly in feature space, if FALSE, sampling is of
+                         # contiguous points - i.e. neighbors in the Seurat graph
+
+if(!sample_randomly) {
+  library(doParallel)
+  library(foreach)
+  
+  doParallel::registerDoParallel(cl = parallel::makeCluster(detectCores()))
+}
+
+results <- NULL
+
+start <- Sys.time()
+for(cluster_of_interest in coi) {
+  for(tx_of_interest in toi) {
+    cat(paste0(cluster_of_interest, " x ", tx_of_interest, "\n"))
+    
+    n_sample <- md %>%
+      filter(cluster == cluster_of_interest) %>%
+      nrow()
+    n_observed <- md %>%
+      filter(cluster == cluster_of_interest & tx_group == tx_of_interest) %>%
+      nrow()
+    p_observed <- n_observed / n_sample
+    # We need to use proportions because I'm not able to sample exactly n_sample
+    # cells, I'm usually pulling slightly more. This meants comparing observed
+    # vs. expected counts isn't apples-to-apples.
+    
+    observed <- numeric(1000)
+    if(sample_randomly) {
+      background <- md %>%
+        filter(cluster != cluster_of_interest) %>%
+        pull(tx_group)
+      for(i in 1:length(observed)) {
+        observed[i] <- sum(sample(background, size = n_sample, replace = T) == tx_of_interest)
+      }
+    } else {
+      sampled_cells_to_use <- list()
+      for(i in 1:length(observed)) {
+        if(i %% 100 == 0) {
+          cat(paste0("Random draw iteration ", i, "\n"))
+        }
+        sampled_cells_to_use[[i]] <- find_knn(n_sample)
+      }
+      cell_ids <- colnames(momac_nn)
+      groups <- momac_nn@meta.data$Group
+      observed <- foreach(i = 1:length(observed), .combine = 'c') %dopar% {
+        library(magrittr)
+        library(dplyr)
+        cell_ids_use <- sampled_cells_to_use[[i]]
+        mapping <- data.frame(name = cell_ids_use) %>%
+          left_join(data.frame(name = cell_ids,
+                               index = 1:length(cell_ids)), by = "name")
+        tx_group <- groups[mapping$index]
+        sum(tx_group == tx_of_interest)/length(cell_ids_use)
+      }
+    }
+    
+    # Calculate a p-value
+    f <- ecdf(observed)
+    p <- 2 * min(f(p_observed), 1 - f(p_observed)) # two tailed
+    
+    results <- rbind(results,
+                     data.frame(cluster = cluster_of_interest,
+                                tx_group = tx_of_interest,
+                                p = p,
+                                observed_p = p_observed,
+                                expected_p = mean(observed),
+                                CI95_lower = unname(quantile(observed, probs = c(0.025))),
+                                CI95_upper = unname(quantile(observed, probs = c(0.975)))))
+  }
+}
+results$p.adj <- p.adjust(results$p, method = "BH")
+# saveRDS(results, "tx_enrichment_null_distro_summary.rds")
+print(Sys.time() - start)
+
+results %>%
+  left_join(test_df %>%
+              select(cluster, tx_group, n), by = c("cluster", "tx_group")) %>%
+  select(cluster, tx_group, n, observed_p, expected_p, CI95_lower, CI95_upper, p, p.adj) %>%
+  mutate(observed_p = round(observed_p, 3),
+         expected_p = round(expected_p, 3),
+         CI95_lower = round(CI95_lower, 3),
+         CI95_upper = round(CI95_upper, 3)) %>%
+  arrange(cluster, tx_group) %>%
+  kbl() %>%
+  kable_styling()
+```
+
+```{r, fig.height = 3, fig.width = 3}
+# Visualize the null distribution
+ggplot(data.frame(x = observed), aes(x = x)) +
+  geom_histogram(color = "white") +
+  geom_vline(xintercept = p_observed, color = "red") +
+  theme_sara() +
+  labs(x = paste0(tx_of_interest, " fraction in sampled cluster"))
+```
+
+
+Visualizing the observed data (as unlabeled proportions):
+
+```{r}
+ggplot(test_df, aes(x = cluster, y = proportion, fill = tx_group)) +
+  geom_bar(position = "stack", stat = "identity") +
+  theme_sara() +
+  labs(x = "Cluster", y = "Proportion", fill = "Treatment group")
+```
+
+As unlabeled counts:
+
+```{r}
+# Counts
+ggplot(test_df, aes(x = cluster, y = n, fill = tx_group)) +
+  geom_bar(position = "stack", stat = "identity") +
+  theme_sara() +
+  labs(x = "Cluster", y = "Count", fill = "Treatment group")
+```
+
+As labeled proportions:
+
+```{r, fig.height = 3.5, fig.width = 4.25}
+# Labeled proportions
+label_df <- test_df %>%
+  left_join(test_df %>%
+              select(-n) %>%
+              pivot_wider(id_cols = c(cluster), names_from = tx_group, values_from = proportion),
+            by = c("cluster")) %>%
+  mutate(
+    y = case_when(
+      tx_group == "RT_plus_CpG" ~ RT_plus_CpG/2,
+      tx_group == "RT" ~ RT_plus_CpG + RT/2,
+      tx_group == "CpG" ~ RT_plus_CpG + RT + CpG/2,
+      TRUE ~ RT_plus_CpG + RT + CpG + Control/2
+    )) %>%
+  select(-c(RT, RT_plus_CpG, CpG, Control))
+
+ggplot(test_df, aes(x = cluster, y = proportion, fill = tx_group)) +
+  geom_bar(position = "stack", stat = "identity") +
+  geom_label(data = label_df,
+             mapping = aes(x = cluster, y = y, label = n),
+             fill = "white") +
+  theme_sara() +
+  labs(x = "Cluster", y = "Proportion", fill = "Treatment group")
+```
+
+
+
+
+
+
+
+
+
+
+
+
