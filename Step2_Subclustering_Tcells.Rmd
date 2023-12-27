@@ -1,0 +1,1301 @@
+---
+title: "T cell subclustering"
+author: "Rosa Hernansaiz-Ballesteros, Ph.D; Vincent Perez, Ph.D. | Tempus labs Inc."
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+      self_contained: true
+      thumbnails: false
+      lightbox: true
+      gallery: false
+      theme: cosmo
+      highlight: kate
+      toc: true
+      toc_depth: 3
+      toc_float: yes
+      code_folding: show
+params:
+  seurat: "~/vincent_perez/data/seurat_30May22_harmony_clusters.rds" ### This file was generated from Step1_harmony_analysis.Rmd
+  seurat_scc: "~/vincent_perez/data/seurat_6Jun22_tcells.rds"
+  cells: ["T cells", "NKT", "Tgd", "NK cells", "ILC"] 
+  cluster_resolution: [0.075, 0.1, 0.15, 0.2, 0.3, 0.35, 0.4, 0.5, 0.8]
+  prefix: "Tcells"
+  variable_genes: 5000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+# Purpose
+The objective is perform subclustering on the T cells, and potentially identify CD4 vs CD8 T cells, as well as activated and exhausted T cells.
+
+# Setup
+
+### Load libraries
+
+```{r lib}
+library(Seurat)
+library(data.table)
+library(janitor)
+library(limma)
+library(ggplot2)
+library(ComplexHeatmap)
+library(microViz)
+library(dplyr)
+library(harmony)
+library(openxlsx)
+library(ProjecTILs)
+```
+
+
+### Plot functions and colors
+```{r functions}
+theme_sara <- function(){
+  theme_bw(base_size=10)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+theme_sara_90 <- function() {
+  theme_bw(base_size=18)+
+    theme(axis.text.x=element_text(angle=90,hjust = 1,vjust = 0.5),
+          axis.text=element_text(color="black"),
+          panel.background=element_rect(color="black"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+```
+
+```{r plot-colors}
+Group2.cols <- rcartocolor::carto_pal(n=5, "Teal")
+Group4.cols <- rcartocolor::carto_pal(n=5, "Emrld")
+Group10.cols <- rcartocolor::carto_pal(n=5, "BurgYl")
+Group8.cols <- rcartocolor::carto_pal(n=5, "Purp")
+
+
+sample.cols <- c(Group2.cols, Group4.cols, Group8.cols, Group10.cols)
+names(sample.cols) <- c(c("770128", "770163", "770226", "770227", "770264"),
+                        c("770200", "770223", "770238","770271", "770279"),
+                        c("770174", "770184", "770225","770216", "770267"),
+                        c("770240", "770224", "770231", "770203", "770232"))
+
+
+group.cols <- c(RT=Group2.cols[[1]],
+                Control=Group4.cols[[5]],
+                RT_plus_CpG=Group8.cols[[1]],
+                CpG=Group10.cols[[4]])
+
+unikn_blueRed <- colorRampPalette(c("#324376","white","#771434"))(256)
+
+black_blue_yel <- colorRampPalette(c("black", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+black_blue_yel2 <- colorRampPalette(c("black", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+grey_blue_yel <- colorRampPalette(c("grey17", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+
+
+ref.cols <- list()
+
+ref.cols[["SingleR_ImmGen"]]  <- c(`B cells` = "#F0A0FF", 
+                                   `Basophils` = "#9370DB",
+                                    `Eosinophils`= "#B452CD",
+                                   `DC` = "#9DCC00", 
+                                   `Epithelial cells` = "#87CEFA",  
+                                   `Endothelial cells` = "#6495ED",
+                                   `Fibroblasts` = "navy",
+                                   `ILC` = "#191919", 
+                                   `Macrophages` = "#1C8356", 
+                                   `Mast cells` = "#E9Debb", 
+                                   `Monocytes` = "#81C57A", 
+                                   `Microglia` = "#EEB4B4",
+                                   `Neutrophils` = "#b10da1",
+                                   `NK cells` = "#8F7C00", 
+                                   `NKT` = "#FEAF16", 
+                                   `Others` = "gray40", 
+                                   `Stem cells` = "red", 
+                                   `Stromal cells` = "#F08080",
+                                   `T cells` = "#FE902EFF", 
+                                   `Tgd` = "#FFEE33")
+
+ref.cols[["sex"]] = c("F" = "#bada55",  "M" = "#7a8888")
+ref.cols[["phase"]] = c("G1" = "#ebd2be",  "S" = "#51cdc4",  "G2M" = "#cc0000")
+
+heatmap.colfun <- microViz::heat_palette(
+                  palette = "Lisbon",
+                  breaks = 100,
+                  range = c(0,1),
+                  sym = FALSE,
+                  rev = FALSE)
+```
+
+#### Specific functions
+
+```{r specific-funs}
+metaBarplot <- function(x, seurat_scc, meta.var, sr){
+  as.data.table(seurat_scc@meta.data) %>%
+    dplyr::group_by(!!as.name(names(meta.var)[[x]]), !!as.name(sr)) %>%
+    dplyr::summarise(N = n()) %>%
+    dplyr::mutate(res = factor(!!as.name(sr), levels = gtools::mixedsort(unique(seurat@meta.data[[sr]])))) %>%
+    dplyr::rename(var = 1) %>%
+    ggplot(., aes(x=res, y=N, fill=var)) + 
+    geom_col(position="fill", color="black") + 
+    theme_sara() +
+    scale_fill_manual("", values=meta.var[[x]][which(names(meta.var[[x]]) %in% seurat_scc@meta.data[[names(meta.var)[[x]]]])]) +
+    labs(y = "Proportion", x = "") +
+    guides(fill = guide_legend(ncol = 2, nrow = 10)) +
+    theme(legend.position="right")
+}
+
+metaBarplot <- function(x, seurat, meta.var, sr){
+  as.data.table(seurat@meta.data) %>%
+    dplyr::group_by(!!as.name(names(meta.var)[[x]]), !!as.name(sr)) %>%
+    dplyr::summarise(N = n()) %>%
+    dplyr::mutate(res = factor(!!as.name(sr), levels = gtools::mixedsort(unique(seurat@meta.data[[sr]])))) %>%
+    dplyr::rename(var = 1) %>%
+    ggplot(., aes(x=res, y=N, fill=var)) + 
+    geom_col(position="fill", color="black") + 
+    theme_sara() +
+    scale_fill_manual("", values=meta.var[[x]][which(names(meta.var[[x]]) %in% seurat@meta.data[[names(meta.var)[[x]]]])]) +
+    labs(y = "Proportion", x = "") +
+    guides(fill = guide_legend(ncol = 2, nrow = 10)) +
+    theme(legend.position="right")
+}
+
+
+metaBarplot_nFeat <- function(selected.res, seurat_scc){
+  cols_cluster <- pals::polychrome(n=seurat_scc[[paste0("RNA_snn_res.",selected.res)]] %>% pull() %>% levels() %>% length())
+  names(cols_cluster) <- seurat_scc[[paste0("RNA_snn_res.",selected.res)]] %>% pull() %>% levels()
+  
+  as.data.table(seurat_scc@meta.data) %>%
+    dplyr::select(!!as.name(paste0("RNA_snn_res.",selected.res)),nFeature_RNA, nCount_RNA, percent.mt) %>%
+    tidyr::pivot_longer(cols = !paste0("RNA_snn_res.",selected.res), names_to = "Feature", values_to = "value") %>%
+    dplyr::rename(res = 1) %>%
+    dplyr::mutate(res = factor(res, levels = gtools::mixedsort(unique(seurat@meta.data[[paste0("RNA_snn_res.",selected.res)]])))) %>%
+    ggplot(., aes(x=res, y=value, fill=res)) +
+    geom_boxplot() +
+    scale_fill_manual("", values = cols_cluster) +
+    facet_wrap(.~Feature, scales = "free") +
+    theme_sara() +
+    ylab("") + xlab("") +
+    guides(fill = guide_legend(ncol = 2, nrow = 6))
+}
+
+umap_dot_cluster <- function(x, seurat_scc, mm){
+  print(x)
+  cols_cluster <- pals::polychrome(n=seurat_scc[[x]] %>% pull() %>% levels() %>% length())
+  names(cols_cluster) <- seurat_scc[[x]] %>% pull() %>% levels()
+  Idents(seurat_scc) <- seurat_scc@meta.data[[x]]
+
+  # UMAP
+  p1 <- DimPlot(seurat_scc, group.by=x) + 
+    theme_sara() +
+    scale_color_manual(values=cols_cluster)
+  
+  # Dotplot
+  res <- Map(`[`,  mm$cell_type_specific, relist(!duplicated(unlist( mm$cell_type_specific)), skeleton =  mm$cell_type_specific))
+  
+  p2 <- DotPlot(seurat_scc, features = res, scale=FALSE) + 
+    theme_sara_90() + 
+    geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=1) + 
+    scale_color_gradientn(colors=grey_blue_yel, oob=scales::squish, na.value=0)
+
+  return(list("umap" = p1, 
+              "dotPlot" = p2))
+}
+
+```
+
+```{r}
+
+vln_plot <- function(seurat, cols, feature, log=TRUE, idents=NULL, alpha=0.5) {
+  p <- Seurat::VlnPlot(seurat, idents=idents, features=feature, log=log, alpha=alpha)
+  p <- p + theme_sara()
+  p <- p + scale_fill_manual(values=cols)
+  p <- p + theme(legend.position="none")
+  return(p)
+}
+
+vln_box_plot <- function(dat, feature, cols, x) {
+  p <- ggplot(data=dat, aes(x=.data[[x]], y=.data[[feature]], fill=.data[[x]]))
+  p <- p + geom_boxplot(width=0.5, alpha=0.6)
+  p <- p + geom_violin(alpha=0.5, width=1, position="identity") + labs(y= paste0("log2 (",feature, ")"))
+  p <- p + theme_sara() + theme(axis.title.x=element_blank())
+  p <- p + scale_fill_manual(values=cols)
+  return(p)
+}
+
+features_boxplot <- function(seurat, res, colors, subclusters = NULL, features){
+  
+  Idents(seurat) <- seurat@meta.data[[res]]
+  
+  if(is.null(subclusters)){
+    all <- as.data.frame(t(log2(seurat[["RNA"]]@data[features,]+1) %>% as.matrix())) %>%
+      tibble::rownames_to_column(var = "rn")
+
+  }else{
+    specific_cells <- WhichCells(seurat, idents=as.character(subclusters))
+    all <- as.data.frame(t(log2(seurat[["RNA"]]@data[features, specific_cells]+1) %>%  as.matrix())) %>%
+      tibble::rownames_to_column(var = "rn")
+  }
+
+  dat <- as.data.frame(seurat@meta.data) %>%
+    tibble::rownames_to_column(var = "rn")
+  all <- merge(dat, all, by="rn", all.y=TRUE) %>%
+    dplyr::mutate(res = factor(!!as.name(res), 
+                               levels=gtools::mixedsort(unique(seurat@meta.data[[res]]))))
+
+  ps = lapply(features, function(x, all, colors, res){
+    vln_box_plot(dat=all, feature=x, cols=colors, x = res) +
+      guides(fill = FALSE) #guide_legend(ncol = 2)
+  }, all, colors, res)
+  
+  names(ps) = features
+  return(ps)
+
+}
+
+```
+
+### Import Data
+```{r}
+seurat <- readRDS(params$seurat)
+```
+
+```{r}
+# dir.create("./../processedData/Subclustering/Tcells/", recursive=TRUE, showWarnings=FALSE)
+```
+
+```{r load-markers}
+mmarkers <- readr::read_csv("~/vincent_perez/data/Murine_SingleCell_Immunology_Markers.csv")
+names(mmarkers) <- janitor::make_clean_names(names(mmarkers))
+mmarkers_scc <- mmarkers %>%
+  dplyr::filter(cell_type_broad %in% c("T cell", "ILC")) %>%
+  dplyr::filter(!is.na(mm10_gene))
+
+mm <- list()
+mm[["cell_type_broad"]] = lapply(unique(mmarkers_scc$cell_type_broad), function(x){
+  features = mmarkers_scc %>%
+    dplyr::filter(mm10_gene %in% rownames(seurat[["RNA"]]@data)) %>%
+    dplyr::filter(cell_type_broad == x) %>%
+    dplyr::pull(mm10_gene) %>% unique()
+  
+})
+names(mm[["cell_type_broad"]]) = unique(mmarkers_scc$cell_type_broad)
+
+mm[["cell_type_specific"]] = lapply(unique(mmarkers_scc$cell_type_specific), function(x){
+  features = mmarkers_scc %>%
+    dplyr::filter(mm10_gene %in% rownames(seurat[["RNA"]]@data)) %>%
+    dplyr::filter(cell_type_specific == x) %>%
+    dplyr::pull(mm10_gene) %>% unique()
+  
+})
+names(mm[["cell_type_specific"]]) = unique(mmarkers_scc$cell_type_specific)
+```
+
+# Subclustering - Method 1 - subset cells
+
+First we subset to only the cells of interest
+```{r sub-seurat}
+if (nchar(params$seurat_scc) == 0 ){
+  seurat_scc <- subset(seurat, subset=`SingleR_ImmGen` %chin% params$cells)
+}else{
+  seurat_scc <- readRDS(params$seurat_scc)
+}
+seurat_scc
+```
+
+## Distribution of cells
+
+### In the whole dataset
+```{r}
+sfull = as.data.table(seurat@meta.data) %>%
+  dplyr::group_by(SingleR_ImmGen) %>%
+  dplyr::summarise(n=n())
+
+ncells = sum(sfull$n)
+
+sfull = sfull %>%
+  dplyr::mutate(p = n/ncells)
+
+p2 <- ggplot(data=sfull, aes(x=reorder(SingleR_ImmGen, -n), y=log2(p*100), fill=SingleR_ImmGen))
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual('', values=ref.cols$SingleR_ImmGen)
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11),
+                 legend.position = 'none')
+p2 <- p2 + labs(y="Proportion of cells")
+p2
+```
+
+### Per sample
+
+I want to provide clients an overview on how many total cells we are discussing.
+```{r sample-overview}
+meta.df <- as.data.table(seurat_scc@meta.data)
+summary.df <- meta.df %>% 
+              dplyr::group_by(SampleID) %>% 
+              dplyr::summarise(n=n(),
+                               median_nFeature=median(nFeature_RNA, na.rm=TRUE),
+                               medan_nCount=median(nCount_RNA, na.rm=TRUE),
+                               median_percentMT=median(percent.mt, na.rm=TRUE)) %>%
+              dplyr::left_join(., unique.data.frame(meta.df[, c("SampleID", "Group")]), by = "SampleID")
+
+p2 <- ggplot(data=summary.df, aes(x=reorder(SampleID, -n), y=n, fill=SampleID))
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual(values=sample.cols)
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11),
+                 legend.position="none")
+p2 <- p2 + labs(y="Number of cells") 
+p2 <- p2 + facet_wrap(~Group, scale="free_x")
+p2
+# ggsave(file.path(params$output_fig, paste0(params$prefix, "_number_cells_sample.png")), width=5.5, height=3.5, units="in", dpi=400)
+```
+
+```{r sample-overview-proportion}
+summary.df <- as.data.table(seurat_scc@meta.data) %>% 
+              dplyr::group_by(SampleID, SingleR_ImmGen) %>% 
+              dplyr::summarise(n=n()) %>%
+              dplyr::mutate(p = n/ncells) %>%
+              dplyr::left_join(., unique.data.frame(as.data.table(seurat_scc@meta.data[, c("SampleID", "Group")])), by = "SampleID")
+
+p2 <- ggplot(data=summary.df, aes(x=reorder(SampleID, -n), y=p, fill=SingleR_ImmGen))
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual('', values=ref.cols$SingleR_ImmGen[which(names(ref.cols$SingleR_ImmGen) %in% summary.df$SingleR_ImmGen)])
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11))
+p2 <- p2 + labs(y="Proportion of cells") 
+p2 <- p2 + facet_wrap(~Group, scale="free_x")
+p2
+```
+
+```{r sample-overview-proportion2}
+summary.df <- as.data.table(seurat_scc@meta.data) %>% 
+              dplyr::group_by(SampleID, SingleR_ImmGen) %>% 
+              dplyr::summarise(n=n()) %>%
+              dplyr::mutate(p = dplyr::case_when(SingleR_ImmGen == "ILC" ~ n/sfull$n[sfull$SingleR_ImmGen == "ILC"],
+                                                 SingleR_ImmGen == "NKT" ~ n/sfull$n[sfull$SingleR_ImmGen == "NKT"],
+                                                 SingleR_ImmGen == "NK cells" ~ n/sfull$n[sfull$SingleR_ImmGen == "NK cells"],
+                                                 SingleR_ImmGen == "T cells" ~ n/sfull$n[sfull$SingleR_ImmGen == "T cells"],
+                                                 SingleR_ImmGen == "Tgd" ~ n/sfull$n[sfull$SingleR_ImmGen == "Tgd"])) %>%
+              dplyr::left_join(., unique.data.frame(as.data.table(seurat_scc@meta.data[, c("SampleID", "Group")])), by = "SampleID")
+
+p2 <- ggplot(data=summary.df, aes(x=reorder(SampleID, -n), y=p, fill=SingleR_ImmGen))
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual('', values=ref.cols$SingleR_ImmGen[which(names(ref.cols$SingleR_ImmGen) %in% summary.df$SingleR_ImmGen)])
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11))
+p2 <- p2 + labs(y="Proportion of cells") 
+p2 <- p2 + facet_wrap(~Group, scale="free_x")
+p2
+```
+
+### Per group
+Creating barplots for the whole group
+```{r}
+meta.df <- as.data.table(seurat_scc@meta.data)
+summary.df <- meta.df %>%
+  dplyr::group_by(Group) %>%
+  dplyr::summarise(n=n())
+summary.df$font_color <- c("white", "white", "black", "black")
+p2 <- ggplot(data=summary.df, aes(x=reorder(Group, -n), y=n, fill=Group, label=n, color=font_color))
+
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual(values=group.cols)
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11),
+                 legend.position="none")
+p2 <- p2 + labs(y="Number of cells") 
+p2 <- p2 + scale_color_manual(values=c(`white`="white", `black`="black"))
+p2 <- p2 + geom_label()
+p2
+# ggsave("./../processedData/Subclustering/Tcells//Number_cells_group.png", width=5.5, height=4.75, units="in", dpi=400)
+
+```
+
+```{r}
+summary.df <- as.data.table(seurat_scc@meta.data) %>%
+  dplyr::group_by(Group, SingleR_ImmGen) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(p = n/ncells) %>%
+  dplyr::mutate(font_color = "black")
+# summary.df$font_color <- c("white", "white", "black", "black")
+
+p2 <- ggplot(data=summary.df, aes(x=reorder(Group, -n), y=p, fill=SingleR_ImmGen, label=p, color=font_color))
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual('', values=ref.cols$SingleR_ImmGen[names(ref.cols$SingleR_ImmGen)%in%params$cells])
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11),
+                 legend.position="bottom")
+p2 <- p2 + labs(y="Proportion of cells") 
+p2 <- p2 + scale_color_manual(values=c(`white`="white", `black`="black"))
+
+p2
+```
+
+## PCA & Clustering 
+Since this is a subset of cells, PCA, clustering, and UMAP must all be re-calculated.  First we re-find variable genes and re-scale data. I'm only using 5k features are there are fewer cells in this dataset
+```{r features}
+if (nchar(params$seurat_scc) == 0){
+  seurat_scc <- Seurat::FindVariableFeatures(seurat_scc, 
+                                           selection.method="vst",
+                                           nfeatures=params$variable_genes)
+  seurat_scc <- Seurat::ScaleData(object = seurat_scc, verbose = TRUE)
+  seurat_scc <- Seurat::RunPCA(seurat_scc)
+}
+```
+
+```{r elbowplot-pca}
+ElbowPlot(seurat, ndims = 50, reduction = "pca")
+```
+
+```{r}
+pca_dims = 30
+```
+# Run Harmony
+
+```{r runharmony, eval=FALSE}
+if(nchar(params$seurat_scc) == 0){
+  options(repr.plot.height = 3, repr.plot.width = 6)
+  system.time(seurat_scc %<>% RunHarmony("SampleID", 
+                                   theta = 2, 
+                                   plot_convergence = TRUE, 
+                                   dims.use = 1:pca_dims, 
+                                   max.iter.harmony = 30))
+}
+```
+
+```{r cluster-umap, eval=FALSE}
+if(nchar(params$seurat_scc) == 0){
+seurat_scc <- Seurat::RunUMAP(seurat_scc, dims=1:pca_dims, reduction="harmony")
+seurat_scc <- Seurat::FindNeighbors(seurat_scc, dims = 1:pca_dims, reduction="harmony")
+
+seurat_scc$RNA_snn_res.0.15 <- NULL
+seurat_scc$RNA_snn_res.0.2 <- NULL
+seurat_scc$RNA_snn_res.0.5 <- NULL
+seurat_scc$RNA_snn_res.0.8 <- NULL
+seurat_scc$RNA_snn_res.1.1 <- NULL
+seurat_scc$RNA_snn_res.1.4 <- NULL
+seurat_scc <- Seurat::FindClusters(seurat_scc, algorithm=2, 
+                           resolution=params$cluster_resolution,
+                           verbose=TRUE)
+
+# saveRDS(seurat_scc, "seurat_6Jun22_tcells.rds")
+}
+```
+
+# Analysis
+## UMAPS for metadata
+```{r, fig.width=10, fig.height=6}
+
+contpts = FeaturePlot(seurat_scc, features=c("nCount_RNA", "nFeature_RNA", "percent.mt"),  
+                      ncol = 3,  order = TRUE)
+
+contpts
+
+FeaturePlot(seurat_scc, features="Tlr9", order = TRUE)
+
+```
+
+```{r, fig.width=12, fig.height=10}
+
+meta_fig = list()
+
+meta_fig[["cell_type"]] <- DimPlot(seurat_scc, group.by="SingleR_ImmGen") + 
+  theme_sara() +
+  scale_color_manual(values=ref.cols[["SingleR_ImmGen"]][params$cells]) +
+  guides(override.aes = list(size=4))
+
+meta_fig[["sample"]] <- DimPlot(seurat_scc, group.by="SampleID") + 
+  theme_sara() +
+  scale_color_manual(values=sample.cols) +
+  guides(col = guide_legend(ncol = 2, override.aes = list(size=4)))
+
+meta_fig[["group"]] <- DimPlot(seurat_scc, group.by="Group") + 
+  theme_sara() +
+  scale_color_manual(values=group.cols) +
+  guides(override.aes = list(size=8))
+
+meta_fig[["cc"]] <- DimPlot(seurat_scc, group.by=c("Phase")) +
+  theme_sara()  +
+  guides(override.aes = list(size=8)) +
+  scale_color_manual(values=ref.cols$phase)
+
+meta_fig[["sex"]] <- DimPlot(seurat_scc, group.by=c("sex")) +
+  theme_sara()   +
+  guides(override.aes = list(size=8)) +
+  scale_color_manual(values=ref.cols$sex)
+```
+
+## Cluster analysis
+
+```{r plots-clusters}
+cluster_fig <- lapply(paste0("RNA_snn_res.", sort(params$cluster_resolution)), umap_dot_cluster, seurat_scc, mm)
+
+names(cluster_fig) = sort(params$cluster_resolution)
+
+lapply(cluster_fig, function(x){x$umap})
+
+### Print to PDF
+pdf(file = "~/vincent_perez/Chang_T_cell_clusters_res0.35_UMAP.pdf",
+    width = 8,
+    height = 6
+    )
+cluster_fig[["0.35"]]$umap
+dev.off()
+
+```
+
+```{r selected-res}
+selected.res = 0.3
+```
+
+## Barplots based on clustering
+
+```{r}
+
+meta.var = list("SingleR_ImmGen" = ref.cols$SingleR_ImmGen,
+                "Group" = group.cols,
+                "SampleID" = sample.cols,
+                "Phase" = ref.cols$phase, 
+                "sex" = ref.cols$sex)
+
+meta_barplots = lapply(1:length(meta.var), metaBarplot, seurat_scc, meta.var, paste0("RNA_snn_res.", selected.res))
+names(meta_barplots) = names(meta.var)
+
+
+meta_barplots[["n_features"]] <- metaBarplot_nFeat(selected.res, seurat_scc)
+
+
+```
+## DE (Find markers)
+
+```{r}
+# markers.list <- list()
+# top10.list <- list()
+# 
+# de.res = paste0("RNA_snn_res.", selected.res)
+# 
+# for(i in de.res){
+#   Idents(seurat_scc) <- seurat_scc@meta.data[[i]]
+# markers.list[[i]] <- FindAllMarkers(seurat_scc, 
+#                                                  only.pos = TRUE,
+#                                                  min.pct = 0.25, 
+#                                                  logfc.threshold = .1,
+#                                                  random.seed = 888)
+# 
+# markers.list[[i]] %>%
+#   dplyr::group_by(cluster) %>%
+#   dplyr::top_n(n = 10, wt = avg_log2FC) -> top10.list[[i]]
+# 
+# }
+
+### write to file so you don't have to run this again
+# readr::write_rds(markers.list, file="~/vincent_perez/data/markersLlist.rds")
+# readr::write_rds(top10.list, file="~/vincent_perez/data/top10List.rds")
+markers.list<-readRDS(file="~/vincent_perez/data/markers.list.rds")
+top10.list<-readRDS(file="~/vincent_perez/data/top10.list.rds")
+```
+
+Export
+
+```{r}
+results <- list(top10=top10.list[["RNA_snn_res.0.3"]],
+                top30=markers.list[["RNA_snn_res.0.3"]] %>%
+                               dplyr::group_by(cluster) %>%
+                               dplyr::top_n(n = 30, wt = avg_log2FC))
+
+header_style <- createStyle(halign = "center", textDecoration = "bold")
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Top10")
+writeData(wb, "Top10", results$top10, headerStyle = header_style)
+freezePane(wb, "Top10", firstRow = TRUE)
+setColWidths(wb, "Top10", cols = 1:ncol(results$top10), widths = "auto")
+
+addWorksheet(wb, "Top30")
+writeData(wb, "Top30", results$top30, headerStyle = header_style)
+freezePane(wb, "Top30", firstRow = TRUE)
+setColWidths(wb, "Top30", cols = 1:ncol(results$top30), widths = "auto")
+
+# saveWorkbook(wb, file = "Tcells_Louvain_03_top_markers.xlsx", overwrite = TRUE)
+
+```
+
+### Heatmap
+```{r heatmap-markers}
+heatmap.res = paste0("RNA_snn_res.", selected.res)
+
+markers.list[[heatmap.res]] %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(n = 6, wt = avg_log2FC) -> top6
+
+
+marker.genes <- top6$gene
+SetIdent(seurat_scc, value=heatmap.res)
+seurat.hm <- subset(seurat_scc, downsample=200)
+mat<- seurat.hm[["RNA"]]@data[marker.genes, ] %>% as.matrix()
+mat<- log2(mat+1)
+```
+
+```{r, fig.height=12, fig.width=10}
+clust_anno_top <- seurat.hm@meta.data[[heatmap.res]]
+clust_anno_row <- as.character(top6$cluster)
+
+cols_01 <- pals::polychrome(n=seurat_scc[[heatmap.res]] %>% pull() %>% levels() %>% length())
+names(cols_01) <- seurat_scc[[heatmap.res]] %>% pull() %>% levels()
+
+
+ra <- ComplexHeatmap::rowAnnotation(`Cluster`=clust_anno_row,
+                                     col=list(`Cluster`=cols_01),
+                                     show_legend=FALSE)
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster`=clust_anno_top,
+                                        `Phase` = seurat.hm@meta.data$Phase,
+                                        `Sex` = seurat.hm@meta.data$sex,
+                                        `Group` = seurat.hm@meta.data$Group,
+                                        `Cell Type` = seurat.hm@meta.data$SingleR_ImmGen,
+                                     col=list(`Cluster`=cols_01,
+                                              `Phase` = ref.cols$phase,
+                                              `Sex` = ref.cols$sex,
+                                              `Group` = group.cols,
+                                              `Cell Type` = ref.cols$SingleR_ImmGen),
+                                     show_legend=TRUE)
+
+ComplexHeatmap::Heatmap(mat, name = "Expression",  
+                        cluster_columns = FALSE,
+                        cluster_rows=FALSE,
+                        column_split=seurat.hm@meta.data[[heatmap.res]],
+                        row_split=top6$cluster,
+                        row_names_gp = grid::gpar(fontsize = 8),
+                        column_title=character(0),
+                        column_gap = unit(0.5, "mm"),
+                        col = grey_blue_yel2,
+                        top_annotation = ta,
+                        show_column_names = FALSE,
+                        left_annotation = ra)
+
+# png("./../processedData/Subclustering/Tcells/Heatmap_Louvain_0.5.png", width=10, height=12, units="in", res=400)
+# ComplexHeatmap::Heatmap(mat, name = "Expression",  
+#                         cluster_columns = FALSE,
+#                         cluster_rows=FALSE,
+#                         column_split=seurat.hm@meta.data$Louvain2_0.5,
+#                         row_split=top6$cluster,
+#                         row_names_gp = grid::gpar(fontsize = 8),
+#                         column_title=character(0),
+#                         column_gap = unit(0.5, "mm"),
+#                         col = grey_blue_yel2,
+#                         top_annotation = ta,
+#                         show_column_names = FALSE,
+#                         left_annotation = ra)
+# dev.off()
+```
+
+## Tlr9 expression
+```{r, fig.height=12, fig.width=10}
+
+ggdat = FetchData(seurat_scc, var = c("Tlr9", "Group", "SampleID", paste0("RNA_snn_res.", selected.res))) %>%
+  as.data.frame() %>%
+  dplyr::rename(res = 4) %>%
+  # dplyr::filter(Tlr9 > 0 ) %>%
+  dplyr::mutate(Tlr9 = Tlr9+1)
+
+ggdat %>%
+  ggplot(., aes(x=SampleID, y=Tlr9, fill=SampleID)) +
+  geom_boxplot() +
+  scale_fill_manual("", values = sample.cols[which(names(sample.cols) %in% ggdat$SampleID)]) +
+  facet_grid(.~Group, scales = "free") +
+  scale_y_continuous(trans='log2') +
+  theme_sara() +
+   guides(fill = guide_legend(ncol = 2, nrow = 10)) +
+   ylab("log2(Tlr9)") + xlab("") 
+```
+
+## Umaps of specific genes
+
+```{r}
+which_cells <- function(seurat, group_col_name, group_level) {
+  Idents(seurat) <- seurat@meta.data[[group_col_name]]
+  cells <- WhichCells(seurat, idents=group_level)
+  return(cells)
+}
+
+group_idents <- sapply(names(group.cols), function(g) which_cells(seurat=seurat_scc,
+                                                                  group_col_name="Group",
+                                                                  group_level=g),
+                       simplify=FALSE, USE.NAMES = TRUE)
+
+feature_plot <- function(seurat, feature, cells, ttl=ttl, max_cutoff=NULL) {
+  p <- FeaturePlot(seurat, features=feature, order=TRUE, cells=cells, pt.size = 0.5)
+  p <- p + theme_sara()
+  p <- p + scale_color_gradientn(colors=grey_blue_yel, limits=c(0, max_cutoff), oob=scales::squish, na.value=0)
+  #p <- p + scale_color_viridis_c(name=feature, option="rocket", direction=-1, limits=c(0, max_cutoff), oob=scales::squish, na.value=0)
+  p <- p + labs(title=ttl)
+  return(p)
+}
+
+genes <- c("Cd4", "Cd8a", "Gzmb", "Pdcd1", "Ctla4", "Ifng")
+names(genes) <- genes
+
+gene_scales <- c(`Cd4`=3,
+                 `Cd8a`=3,
+                  `Ctla4`=4,
+                  `Foxp3`=3,
+                   `Gzmb`=5,
+                  `Havcr2`=3,
+                  `Ifna1`=1,
+                 `Ifng`=4,
+                 `Lag3`=3,
+                 `Pdcd1`=3,
+                 `Ifnar1`=2,
+                 `Ifnar2`=2)
+
+feature_plots.list <- lapply(genes, 
+                        function(feature) sapply(names(group_idents),
+                                              function(group) feature_plot(seurat=seurat_scc, 
+                                                                           feature=feature,
+                                                                           cells=group_idents[[group]],
+                                                                           ttl=group,
+                                                                           max_cutoff = gene_scales[[feature]]),
+                                              simplify=FALSE, USE.NAMES = TRUE))
+
+
+grid_plots <- sapply(names(feature_plots.list), function(f) cowplot::plot_grid(feature_plots.list[[f]][[1]],
+                                                                               feature_plots.list[[f]][[2]],
+                                                                               feature_plots.list[[f]][[3]],
+                                                                               feature_plots.list[[f]][[4]],
+                                                                               nrow=2,
+                                                                               ncol=2, 
+                                                                               labels="AUTO", 
+                                                                               adjust="vh"),
+                     simplify=FALSE, USE.NAMES = TRUE)  
+  
+
+# dir.create("Subclustering/Tcells/Gene_plots", recursive=TRUE, showWarnings = FALSE)
+# sapply(names(grid_plots), 
+#        function(gene) ggsave(filename=paste0("Subclustering/Tcells/Gene_plots/UMAP_", gene, "_bygroup.png"),
+#                             plot=grid_plots[[gene]],
+#                              width=10,
+#                              height=8,
+#                              units="in",
+#                              device="png",
+#                              dpi=400),
+#        simplify=FALSE, USE.NAMES=TRUE)
+
+```
+
+# CD4+ / CD8+ T cell subtypes
+
+```{r}
+featrues <- list(major = c("Cd4", "Cd8a", "Foxp3", "Ncr1", "Tcrg-C1"),
+                 cd4 = c("Cd4", "Foxp3","Tigit", "Lef1", "Maf", "Tox", "Tbc1d4", "Icos", "Cxcr5"),
+                 cd8 = c("Cd8a", "Ifng", "Ccr7", "Pdcd1", "Tcf7", "Gzmb", "Tnf" , "Il2", "Eomes", "Ctla4"))
+```
+
+## Violin - major groups
+```{r}
+major_plots = features_boxplot(seurat_scc, res = "RNA_snn_res.0.3", 
+                               colors = cols_01, features = featrues$major)
+
+p <- cowplot::plot_grid(major_plots$Cd4,
+                    major_plots$Cd8a,
+                    major_plots$Ncr1,
+                    major_plots$`Tcrg-C1`,
+                   adjust="vh",
+                   nrow=2,
+                   ncol=2,
+                   labels="AUTO")
+
+# ggsave("./../processedData/Subclustering/Tcells/Tcells_violin_major.png", height=8, width=10, units="in", 
+       # plot=p, device="png", dpi=400)
+p
+```
+
+```{r}
+subcltr = list(cd4 = c(1,4,7), cd8 = c(1, 2, 3, 5, 9))
+```
+
+## Violin - Cd4
+```{r}
+
+cd4_plots = features_boxplot(seurat_scc, res = "RNA_snn_res.0.3", 
+                             colors = cols_01, subclusters = subcltr$cd4,
+                             features = featrues$cd4)
+
+p <- cowplot::plot_grid(cd4_plots$Foxp3,
+                    cd4_plots$Lef1,
+                    cd4_plots$Maf,
+                    cd4_plots$Tox,
+                   adjust="vh",
+                   nrow=2,
+                   ncol=2,
+                   labels="AUTO")
+
+# ggsave("./../processedData/Subclustering/Tcells/Tcells_violin_CD4.png", height=8, width=10, units="in", device="png", dpi=400)
+p
+```
+
+## Violin  - CD8
+```{r}
+
+cd8_plots = features_boxplot(seurat_scc, res = "RNA_snn_res.0.3", 
+                             colors = cols_01, subclusters = subcltr$cd8,
+                             features = featrues$cd8)
+
+p <- cowplot::plot_grid(cd8_plots$Ccr7,
+                    cd8_plots$Pdcd1,
+                    cd8_plots$Eomes,
+                    cd8_plots$Ctla4,
+                    cd8_plots$Ifng,
+                    cd8_plots$Tcf7,
+                    cd8_plots$Gzmb,
+                    cd8_plots$Tnf,
+                    adjust="vh",
+                    nrow=2,
+                    ncol=4,
+                    labels="AUTO")
+
+# ggsave("./../processedData/Subclustering/Tcells/Tcells_violin_CD8.png", height=6, width=10, units="in", device="png", dpi=400)
+
+p
+```
+
+CD8 opposing genes
+
+```{r}
+opposing <- c("Gzmb", "Ifng",  "Tnfa", "Il2")
+```
+
+## Subclustering CD4/CD8 Cluster 1
+
+Cluster 1 is a mix of CD4 and CD8 cells, so we split that particular cluster.
+
+```{r subclustering-1}
+subcluster.name = "RNA_snn_res.0.3_sub1.0.1"
+Idents(seurat_scc) <- seurat_scc@meta.data[["RNA_snn_res.0.3"]]
+seurat_sub <- Seurat::FindSubCluster(seurat_scc, cluster = 1, graph.name = "RNA_snn", 
+                                     resolution = 0.1, algorithm=2,
+                                     subcluster.name = subcluster.name)
+
+cols_cluster <- c(cols_01["0"], "1_0" = "#E4E1E3", "1_1" = "#F3E5AB", cols_01[as.character(2:9)]) 
+Idents(seurat_sub) <- seurat_sub@meta.data[[subcluster.name]]
+
+  # UMAP
+DimPlot(seurat_sub, group.by=subcluster.name) + 
+    theme_sara() +
+    scale_color_manual(values=cols_cluster)
+
+# saveRDS(seurat_sub, "seurat_13Jun22_tcells_subclust.rds")
+```
+
+### Violin - major groups
+```{r}
+major_plots = features_boxplot(seurat_sub, res = subcluster.name, 
+                               colors = cols_cluster, features = featrues$major)
+
+p <- cowplot::plot_grid(major_plots$Cd4,
+                    major_plots$Cd8a,
+                    major_plots$Ncr1,
+                    major_plots$`Tcrg-C1`,
+                   adjust="vh",
+                   nrow=2,
+                   ncol=2,
+                   labels="AUTO")
+
+# ggsave("./../processedData/Subclustering/Tcells/Tcells_violin_major.png", height=8, width=10, units="in", 
+#        plot=p, device="png", dpi=400)
+p
+```
+
+```{r}
+subcltr = list(cd4 = c("1_0",4,7), cd8 = c("1_1", 2, 3, 5, 9))
+```
+
+### Violin - Cd4
+```{r}
+
+cd4_plots = features_boxplot(seurat_sub, res = subcluster.name, 
+                             colors = cols_cluster, subclusters = subcltr$cd4,
+                             features = featrues$cd4)
+
+p <- cowplot::plot_grid(cd4_plots$Foxp3,
+                    cd4_plots$Lef1,
+                    cd4_plots$Maf,
+                    cd4_plots$Tox,
+                    cd4_plots$Tbc1d4,
+                    cd4_plots$Icos,
+                    adjust="vh",
+                    nrow=2,
+                    ncol=3,
+                    labels="AUTO")
+
+# ggsave("./../processedData/Subclustering/Tcells/Tcells_violin_CD4.png", height=8, width=10, units="in", device="png", dpi=400)
+p
+
+```
+
+### Violin  - CD8
+```{r}
+
+cd8_plots = features_boxplot(seurat_sub, res = subcluster.name, 
+                             colors = cols_cluster, 
+                             subclusters = subcltr$cd8,
+                             features = featrues$cd8)
+
+p <- cowplot::plot_grid(cd8_plots$Ccr7,
+                    cd8_plots$Pdcd1,
+                    cd8_plots$Eomes,
+                    cd8_plots$Ctla4,
+                    cd8_plots$Ifng,
+                    cd8_plots$Tcf7,
+                    cd8_plots$Gzmb,
+                    cd8_plots$Tnf,
+                    adjust="vh",
+                    nrow=2,
+                    ncol=4,
+                    labels="AUTO")
+
+# ggsave("./../processedData/Subclustering/Tcells/Tcells_violin_CD8.png", height=6, width=10, units="in", device="png", dpi=400)
+
+p
+```
+
+### Barplot of meta data
+
+```{r}
+meta_barplots = lapply(1:length(meta.var), metaBarplot, seurat_sub, meta.var, subcluster.name)
+names(meta_barplots) = names(meta.var)
+```
+
+### DE (Find markers)
+
+```{r}
+# Idents(seurat_sub) <- seurat_sub@meta.data[[subcluster.name]]
+# markers.list[[subcluster.name]] <- FindAllMarkers(seurat_sub,
+#                                     only.pos = TRUE,
+#                                     min.pct = 0.25, 
+#                                     logfc.threshold = .1,
+#                                     random.seed = 888)
+# 
+# markers.list[[subcluster.name]] %>%
+#   dplyr::group_by(cluster) %>%
+#   dplyr::top_n(n = 10, wt = avg_log2FC) -> top10.list[[subcluster.name]]
+
+### Write to file so not to have to run again
+# readr::write_rds(markers.list, file="~/vincent_perez/data/markers.list.rds")
+# readr::write_rds(top10.list, file="~/vincent_perez/data/top10.list.rds")
+
+### Read from file
+markers.list<-readRDS(file="~/vincent_perez/data/markers.list.rds")
+top10.list<-readRDS(file="~/vincent_perez/data/top10.list.rds")
+```
+
+Export
+```{r}
+results <- list(top10=top10.list[["RNA_snn_res.0.3_sub1.0.1"]],
+                top30=markers.list[["RNA_snn_res.0.3_sub1.0.1"]] %>%
+                               dplyr::group_by(cluster) %>%
+                               dplyr::top_n(n = 30, wt = avg_log2FC))
+
+header_style <- createStyle(halign = "center", textDecoration = "bold")
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Top10")
+writeData(wb, "Top10", results$top10, headerStyle = header_style)
+freezePane(wb, "Top10", firstRow = TRUE)
+setColWidths(wb, "Top10", cols = 1:ncol(results$top10), widths = "auto")
+
+addWorksheet(wb, "Top30")
+writeData(wb, "Top30", results$top30, headerStyle = header_style)
+freezePane(wb, "Top30", firstRow = TRUE)
+setColWidths(wb, "Top30", cols = 1:ncol(results$top30), widths = "auto")
+
+# saveWorkbook(wb, file = "Chang_momacdc/Tcells_Louvain_03_subcluster1_01_top_markers.xlsx", overwrite = TRUE)
+
+```
+
+#### Heatmap
+```{r heatmap-markers-sub}
+heatmap.res = subcluster.name
+
+markers.list[[heatmap.res]] %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(n = 6, wt = avg_log2FC) -> top6
+
+
+marker.genes <- top6$gene
+SetIdent(seurat_sub, value=heatmap.res)
+seurat.hm <- subset(seurat_sub, downsample=200)
+mat<- seurat.hm[["RNA"]]@data[marker.genes, ] %>% as.matrix()
+mat<- log2(mat+1)
+```
+
+```{r, fig.height=12, fig.width=10}
+clust_anno_top <- seurat.hm@meta.data[[heatmap.res]]
+clust_anno_row <- as.character(top6$cluster)
+
+ra <- ComplexHeatmap::rowAnnotation(`Cluster`=clust_anno_row,
+                                     col=list(`Cluster`=cols_cluster),
+                                     show_legend=FALSE)
+
+ta <- ComplexHeatmap::HeatmapAnnotation(`Cluster`=clust_anno_top,
+                                        `Phase` = seurat.hm@meta.data$Phase,
+                                        `Sex` = seurat.hm@meta.data$sex,
+                                        `Group` = seurat.hm@meta.data$Group,
+                                        `Cell Type` = seurat.hm@meta.data$SingleR_ImmGen,
+                                     col=list(`Cluster`=cols_cluster,
+                                              `Phase` = ref.cols$phase,
+                                              `Sex` = ref.cols$sex,
+                                              `Group` = group.cols,
+                                              `Cell Type` = ref.cols$SingleR_ImmGen),
+                                     show_legend=TRUE)
+
+ComplexHeatmap::Heatmap(mat, name = "Expression",  
+                        cluster_columns = FALSE,
+                        cluster_rows=FALSE,
+                        column_split=seurat.hm@meta.data[[heatmap.res]],
+                        row_split=factor(top6$cluster, levels = gtools::mixedsort(as.character(unique(top6$cluster)))),
+                        row_names_gp = grid::gpar(fontsize = 8),
+                        column_title=character(0),
+                        column_gap = unit(0.5, "mm"),
+                        col = grey_blue_yel2,
+                        top_annotation = ta,
+                        show_column_names = FALSE,
+                        left_annotation = ra)
+
+# png("./../processedData/Subclustering/Tcells/Heatmap_Louvain_0.5.png", width=10, height=12, units="in", res=400)
+# ComplexHeatmap::Heatmap(mat, name = "Expression",  
+#                         cluster_columns = FALSE,
+#                         cluster_rows=FALSE,
+#                         column_split=seurat.hm@meta.data$Louvain2_0.5,
+#                         row_split=top6$cluster,
+#                         row_names_gp = grid::gpar(fontsize = 8),
+#                         column_title=character(0),
+#                         column_gap = unit(0.5, "mm"),
+#                         col = grey_blue_yel2,
+#                         top_annotation = ta,
+#                         show_column_names = FALSE,
+#                         left_annotation = ra)
+# dev.off()
+```
+
+# T cell types by group
+
+```{r}
+seurat_sub@meta.data$L5_clust <- as.factor(as.character(seurat_sub@meta.data[[subcluster.name]]))
+seurat_sub@meta.data$Major_T_types <- forcats::fct_collapse(seurat_sub@meta.data$L5_clust,
+                                                            CD4=subcltr$cd4,
+                                                            CD8=subcltr$cd8,
+                                                            ILC="0",
+                                                            Tgd="6",
+                                                            Other="8")
+tcell.cols <- c(`CD4`="#F6222E",
+                `CD8`="#3283FE",
+                `ILC`="#5A5156",
+                `Tgd`="#FFEE33",
+                Other="grey90")
+
+# saveRDS(seurat_sub, file="./../processedData/Subclustering/Tcells/seurat_tcells.rds")
+```
+
+```{r}
+dt1 <- seurat_sub@meta.data
+dt <- dt1 %>%
+  dplyr::group_by(Group, Major_T_types) %>%
+    dplyr::summarise(N = n()) %>%
+    dplyr::mutate(Major_T_types = factor(Major_T_types, levels = gtools::mixedsort(unique(dt1$Major_T_types)))) 
+
+dt$total_cells <- dt$Group
+dt$total_cells <- gsub("RT$", "29159", dt$total_cells, perl=TRUE)
+dt$total_cells <- gsub("RT_plus_CpG", "27056", dt$total_cells)
+dt$total_cells <- gsub("Control", "19997", dt$total_cells)
+dt$total_cells <- gsub("CpG", "17881", dt$total_cells)
+dt$total_cells <- as.numeric(dt$total_cells)
+dt$Proportion <- dt$N/dt$total_cells
+
+p <- ggplot(data=dt, aes(x=Group, y=Proportion, fill=Major_T_types))
+p <- p + geom_col(position="stack", color="black")
+p <- p + theme_sara_90() + facet_wrap(~Group, nrow=1, scale="free_x")
+p <- p + scale_fill_manual("", values=tcell.cols)
+p <- p + labs(y="Proportion")
+p <- p + theme(axis.title.x=element_blank(),
+               axis.text=element_text(size=11),
+               axis.text.x=element_blank(),
+               legend.text=element_text(size=11),
+               legend.title=element_text(size=1),
+               axis.title.y=element_text(size=12),
+               strip.text=element_text(size=11),
+               legend.spacing.x = unit(0.5, 'cm'),
+               legend.spacing.y=unit(0.2, "cm"),
+               legend.key.size=unit(0.5, "cm"),
+               legend.position="bottom") 
+p <- p + guides(fill=guide_legend(byrow=TRUE))
+# ggsave("./../processedData/Subclustering/Tcells_Bar_prop.png", width=10, height=6, dpi=400)
+p
+```
+
+```{r}
+
+Idents(seurat_sub) <- seurat_sub@meta.data$Group
+p1 <- DimPlot(seurat_sub, group.by="Major_T_types", cells=WhichCells(seurat_sub, idents="Control"))
+p1 <- p1 + theme_sara() + labs(title="Control") + theme(legend.position="none")
+p1 <- p1 + scale_color_manual(values=tcell.cols)
+
+p2 <- DimPlot(seurat_sub, group.by="Major_T_types", cells=WhichCells(seurat_sub, idents="CpG"))
+p2 <- p2 + theme_sara() + labs(title="CpG")  + theme(legend.position="none")
+p2 <- p2 + scale_color_manual(values=tcell.cols)
+
+p3 <- DimPlot(seurat_sub, group.by="Major_T_types", cells=WhichCells(seurat_sub, idents="RT"))
+p3 <- p3 + theme_sara() + labs(title="RT")  + theme(legend.position="none")
+p3 <- p3 + scale_color_manual(values=tcell.cols)
+
+p4 <- DimPlot(seurat_sub, group.by="Major_T_types", cells=WhichCells(seurat_sub, idents="RT_plus_CpG"))
+p4 <- p4 + theme_sara() + labs(title="RT_plus_CpG")  + theme(legend.position="none")
+p4 <- p4 + scale_color_manual(values=tcell.cols)
+
+p <- cowplot::plot_grid(p1, p2, p3, p4, ncol=2, nrow=2, labels="AUTO")
+# ggsave("./../processedData/Subclustering/Tcells/Umap_MajorTypes.png", plot=p, width=12, height=10, units="in", device="png", dpi=400)
+cowplot::plot_grid(p1, p2, p3, p4, ncol=2, nrow=2, labels="AUTO")
+```
+
+
+```{r}
+p4 <- DimPlot(seurat_sub, group.by="Major_T_types")
+p4 <- p4 + theme_sara()
+p4 <- p4 + scale_color_manual(values=tcell.cols)
+# ggsave("./../processedData/Subclustering/Tcells/Umap_MajorTypes_allsamples.png", plot=p4, width=6, height=4, units="in", device="png", dpi=400)
+p4
+```
+
+# Subclustering - Method 2 - T cell predictors
+
+```{r}
+ref <- ProjecTILs::load.reference.map()
+```
+
+```{r}
+# tcell_filt.projected <- ProjecTILs::make.projection(seurat_sub, ref=ref, filter.cells=TRUE)
+# tcell_filt.projected <- ProjecTILs::cellstate.predict(ref=ref, query=tcell_filt.projected)
+# table(tcell_filt.projected$functional.cluster)
+
+### Write to disk to not to repeat
+# readr::write_rds(tcell_filt.projected, file="~/vincent_perez/data/tcell_filt.projected.rds")
+tcell_filt.projected<-readRDS(file="~/vincent_perez/data/tcell_filt.projected.rds")
+```
+
+
+```{r}
+dat <- as.data.frame(seurat_sub@meta.data)
+dat <- dat[,names(dat) %in% c("Group", "RNA_snn_res.0.3_sub1.0.1")]
+dat$rn <- rownames(seurat_sub@meta.data)
+tcell.df <- as.data.frame(tcell_filt.projected@meta.data)
+tcell.df <- tcell.df[, names(tcell.df) %in% c("SampleID", "cycling.score", "cycling.score.G1_S", "cycling.score.G2_M", "anchor.score", "functional.cluster", "functional.cluster.conf")]
+tcell.df$rn <- rownames(tcell_filt.projected@meta.data)
+
+meta <- merge(dat, tcell.df, all.x=TRUE, by="rn")
+perm <- match(rownames(seurat_scc@meta.data), meta$rn)
+meta <- meta[perm,]
+rownames(meta) <- meta$rn
+seurat_sub <- AddMetaData(seurat_sub, meta)
+seurat_sub@meta.data$tcell_projected_clust_filt <- ifelse(is.na(seurat_sub@meta.data$functional.cluster), "Other", seurat_sub@meta.data$functional.cluster)
+```
+
+## UMAPS with ProjectTILs
+```{r, fig.width=12, fig.height=10}
+
+lcc <- c("#EA7580", "#F6A1A5", "#F8CD9C", "#1BB6AF", "#088BBE", 
+         "#172869", "#C70E7B", "#FC6882", "#A6E000", "#D72000",
+         "#EE6100", "#FFAD0A")
+
+
+tcell.cols <- c(`CD4_NaiveLike`="#F6A1A5",
+                `CD8_EarlyActiv`="#D72000",
+                `CD8_EffectorMemory`="#172869",
+                `CD8_NaiveLike`="#1BB6AF",
+                `CD8_Tex`="#FFAD0A",
+                `CD8_Tpex`="lightblue",
+                `Other`="grey90" ,               
+                `Tfh`="#C70E7B",                
+                `Th1`="#088BBE",               
+                `Treg`="#A6E000")
+
+p3 <- DimPlot(seurat_sub, group.by=subcluster.name)
+p3 <- p3 + theme_sara() + theme(legend.position = "bottom")
+p3 <- p3 + scale_color_manual(values=cols_cluster)
+
+
+cell_cycle.cols <- c("#01617E","#8B9934","#E04883")
+names(cell_cycle.cols) <- levels(as.factor(seurat_sub@meta.data$Phase))
+pt <- DimPlot(seurat_sub, group.by="Phase")
+pt <- pt + theme_sara() + theme(legend.position = "bottom")
+pt <- pt + scale_color_manual(values=cell_cycle.cols)
+
+pt2 <- DimPlot(seurat_sub, group.by="tcell_projected_clust_filt")
+pt2 <- pt2 + theme_sara() + theme(legend.position = "bottom")
+pt2 <- pt2 + scale_color_manual(values=tcell.cols)
+
+
+immgen.cols <- ref.cols[["SingleR_ImmGen"]][which(names(ref.cols[["SingleR_ImmGen"]]) %in% params$cells)]
+pa <- DimPlot(seurat_sub, group.by="SingleR_ImmGen")
+pa <- pa + theme_sara() + theme(legend.position = "bottom")
+pa <- pa + scale_color_manual(values=immgen.cols)
+
+p <- cowplot::plot_grid(p3, pa,
+                   pt, pt2, nrow=2, ncol=2, labels="AUTO", adjust="vh")
+# ggsave("./../processedData/Subclustering/Tcells/UMAP_all.png", width=12, height=10, units="in", device="png", dpi=400)
+
+p
+```
+
+# Gene expression UMAPs
+
+```{r, fig.width=12, fig.height=10}
+p.list <- FeaturePlot(seurat_sub, features=c("Cd8a", "Tcf7", "Cd4", "Pdcd1"), combine=FALSE) 
+
+for (i in 1:length(p.list)) {
+  p <- p.list[[i]]
+  p <- p + scale_color_viridis_c(option="rocket", direction=-1)
+  p <- p + theme_sara()
+  p.list[[i]] <- p
+}
+
+p <- cowplot::plot_grid(plotlist = p.list, labels="AUTO", nrow=2, ncol=2)
+# ggsave("./../processedData/Subclustering/Tcells/UMAP_exhausted.png", width=12, height=10, units="in", device="png", dpi=400)
+
+pp8 <- cowplot::plot_grid(p.list[[1]], labels="AUTO", nrow=1)
+pp4 <- cowplot::plot_grid(p.list[[3]], labels="AUTO", nrow=1)
+# ggsave("./../processedData/Subclustering/Tcells/UMAP_CD8.png", plot=pp8, width=6, height=4, units="in", device="png", dpi=400)
+# ggsave("./../processedData/Subclustering/Tcells/UMAP_CD4.png", plot=pp4, width=6, height=4, units="in", device="png", dpi=400)
+
+p
+```
+
+# R Session Information
+<details>
+<summary>Information about R, the OS and attached or loaded packages</summary>
+```{r sesion_info}
+pander::pander(sessionInfo(), compact = FALSE)
+```
+</details>
+***
+<center>`r format(Sys.time(), '%d %B %Y')`</center>
