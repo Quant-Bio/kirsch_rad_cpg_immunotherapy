@@ -1,0 +1,106 @@
+---
+title: "CellRanger QC: `r params$analysed_dataset`"
+date: "Analysed on `r format(Sys.time(), '%B %d, %Y')`"
+author: "QuantBio `r params$more_authors`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+    fig_width: 10
+    fig_height: 10
+    toc_depth: 5
+params:
+  analysed_dataset: "Example"
+  more_authors: ""
+  crc_mtx_dir: "./../rawData"
+  qcs_patient_id: "SampleID"
+  raw_seurat: "./../processedData/Su_7142_210727B6_raw.rds"
+    
+---
+
+```{r setup, include=FALSE}
+### Set knitr global options
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+
+### Load libraries
+library(data.table)
+library(readr)
+library(formattable)
+library(DT)
+library(Seurat)
+```
+
+# Purpose
+To import single feature files convert to Seurat objects, and merge.  QC metrics from CellRanger are imported for each sample and exported as a single table.
+
+## 0.1 Import QC metrics
+
+``` {r import-metrics-files, tidy='styler', tidy.opts=list(strict=FALSE)}
+samples <- list.dirs(params$crc_mtx_dir, recursive=FALSE, full.names = FALSE)
+sample.dirs <- list.dirs(params$crc_mtx_dir, recursive=FALSE, full.names=TRUE)
+names(sample.dirs) <- samples
+
+metrics.dt.list <- lapply(sample.dirs, function(sd) data.table::fread(file=paste0(eval(sd), "/metrics_summary.csv")))
+metrics.dt.list <- lapply(metrics.dt.list, function(dt) setnames(dt, names(dt), gsub(" ", "_", names(dt))))
+metrics.dt <- rbindlist(metrics.dt.list, idcol="Sample")
+sn <- metrics.dt$Sample
+
+metrics.dt <- metrics.dt[, lapply(.SD, function(c) gsub("%|,", "", c))]
+cols_convert <- names(metrics.dt)[2:ncol(metrics.dt)]
+metrics.dt <- metrics.dt[, lapply(.SD, as.integer), .SDcols=cols_convert]
+metrics.dt$SampleID <- sn
+
+setcolorder(metrics.dt, "SampleID")
+
+dir.create("./../processedData/", recursive=TRUE, showWarnings = FALSE)
+data.table::fwrite(metrics.dt, file="./../processedData/cellranger_metrics.txt", sep="\t")
+
+```
+
+## 0.2 Create sample level rds file, if starting from filtered_matrix_bc file for each sample
+
+```{r create-sample-seurat, tidy='styler', tidy.opts=list(strict=FALSE)}
+
+# Convenience function for creating seurat object files
+create_seurat <- function(sample_dir) {
+    expression_matrix <- Seurat::ReadMtx(mtx = paste0(eval(sample_dir), "/filtered_feature_bc_matrix/matrix.mtx.gz"),
+                                 features = paste0(eval(sample_dir), "/filtered_feature_bc_matrix/features.tsv.gz"),
+                                 cells = paste0(eval(sample_dir), "/filtered_feature_bc_matrix/barcodes.tsv.gz"),
+                                 feature.column = 2,
+                                 mtx.transpose=FALSE)
+    seurat <- CreateSeuratObject(expression_matrix, min.features=100)
+    return(seurat)
+}
+
+
+seurat.list <- lapply(sample.dirs, function(sd) create_seurat(sd))
+
+```
+
+
+## 0.4 Merge sample level rds files into experiment level rds file
+
+```{r merge-seurat, tidy='styler', tidy.opts=list(strict=FALSE), eval=params$crc_merge_sample_seurat}
+
+num_seurat_obj <- length(seurat.list)
+experiment_seurat <- merge(x=seurat.list[[1]], 
+                           y=seurat.list[2:num_seurat_obj],  
+                           add.cell.ids=names(seurat.list))
+meta <- experiment_seurat@meta.data
+experiment_seurat[["SampleID"]] <- unlist(tstrsplit(rownames(meta), "_", keep=1))
+saveRDS(experiment_seurat, file=params$raw_seurat)
+
+```
+
+# Information about the Session 
+
+<details>
+<summary>Information about R, the OS and attached or loaded packages</summary>
+```{r sesion_info}
+pander::pander(sessionInfo(), compact = FALSE)
+```
+</details>
