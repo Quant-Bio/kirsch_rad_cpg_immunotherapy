@@ -1,0 +1,677 @@
+---
+title: "Harmony analysis"
+author: "Rosa Hernansaiz-Ballesteros, Ph.D | Vincent Perez, Ph.D | Tempus labs Inc."
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+      self_contained: true
+      thumbnails: false
+      lightbox: true
+      gallery: false
+      theme: cosmo
+      highlight: kate
+      toc: true
+      toc_depth: 3
+      toc_float: yes
+      code_folding: show
+params:
+  seurat: "seurat_05Apr2022_0418UTC_10k.rds"  ### This file was generated from Step0_QB_SingleCell_qQC_05Apr2022_0418UTC_10k.html. The UTC stands for universal timezone, and the 10K stands for the variable features used in downstream calculations.
+  output_fig : "harmony"
+  cells: ["Monocytes", "Macrophages","DC"] 
+  cluster_resolution: [0.15, 0.2, 0.5, 0.8, 1.1, 1.4] 
+  variable_genes: 10000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+# Purpose
+The objective is use harmony on the seurat object to remove sample effect.
+
+# Setup
+
+### Load libraries
+
+```{r lib, echo=FALSE}
+library(Seurat)
+library(data.table)
+library(janitor)
+library(limma)
+library(ggplot2)
+library(ComplexHeatmap)
+library(microViz)
+library(dplyr)
+library(harmony)
+library(magrittr)
+```
+
+
+### Plot functions and colors
+```{r functions}
+theme_sara <- function(){
+  theme_bw(base_size=18)+
+    theme(axis.text=element_text(color="black"),
+          panel.background=element_rect(color="white"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+
+theme_sara_90 <- function() {
+  theme_bw(base_size=18)+
+    theme(axis.text.x=element_text(angle=90,hjust = 1,vjust = 0.5),
+          axis.text=element_text(color="black"),
+          panel.background=element_rect(color="black"),
+          strip.text = element_text(size=12),
+          strip.background = element_rect(fill="white"))
+}
+```
+
+```{r plot-colors}
+Group2.cols <- rcartocolor::carto_pal(n=5, "Teal")
+Group4.cols <- rcartocolor::carto_pal(n=5, "Emrld")
+Group10.cols <- rcartocolor::carto_pal(n=5, "BurgYl")
+Group8.cols <- rcartocolor::carto_pal(n=5, "Purp")
+
+sample.group.cols <- c(rep(Group2.cols[[1]], 5), 
+                       rep(Group4.cols[[5]], 5),
+                       rep(Group8.cols[[1]], 5), 
+                       rep(Group10.cols[[4]], 5))
+names(sample.group.cols) <- c(c("770128", "770163", "770226", "770227", "770264"),
+                        c("770200", "770223", "770238","770271", "770279"),
+                        c("770174", "770184", "770225","770216", "770267"),
+                        c("770240", "770224", "770231", "770203", "770232"))
+
+
+sample.cols <- c(Group2.cols, Group4.cols, Group8.cols, Group10.cols)
+names(sample.cols) <- c(c("770128", "770163", "770226", "770227", "770264"),
+                        c("770200", "770223", "770238","770271", "770279"),
+                        c("770174", "770184", "770225","770216", "770267"),
+                        c("770240", "770224", "770231", "770203", "770232"))
+
+
+group.cols <- c(RT=Group2.cols[[1]],
+                Control=Group4.cols[[5]],
+                RT_plus_CpG=Group8.cols[[1]],
+                CpG=Group10.cols[[4]])
+
+group.cols1=c("Ctl"="#535353",
+           "RT"="#7A81FF",
+           "CpG"="#72FA79",
+           "CpG+RT"="#FF7E79")
+
+unikn_blueRed <- colorRampPalette(c("#324376","white","#771434"))(256)
+
+black_blue_yel <- colorRampPalette(c("black", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+black_blue_yel2 <- colorRampPalette(c("black", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+grey_blue_yel <- colorRampPalette(c("grey17", "#31446B", "#666870", "#D9C560", "#FFE945"))(256)
+
+grey_blue_yel2 <- colorRampPalette(c("grey17", "#31446B", "#666870", "#d3c064", "#FFE945"))(256)
+
+
+
+ref.cols <- list()
+
+ref.cols[["SingleR_ImmGen"]]  <- c(`B cells` = "#F0A0FF", 
+                                   `Basophils` = "#9370DB",
+                                    `Eosinophils`= "#B452CD",
+                                   `DC` = "#9DCC00", 
+                                   `Epithelial cells` = "#87CEFA",  
+                                   `Endothelial cells` = "#6495ED",
+                                   `Fibroblasts` = "navy",
+                                   `ILC` = "#191919", 
+                                   `Macrophages` = "#1C8356", 
+                                   `Mast cells` = "#E9Debb", 
+                                   `Monocytes` = "#81C57A", 
+                                   `Microglia` = "#EEB4B4",
+                                   `Neutrophils` = "#b10da1",
+                                   `NK cells` = "#8F7C00", 
+                                   `NKT` = "#FEAF16", 
+                                   `Others` = "gray40", 
+                                   `Stem cells` = "red", 
+                                   `Stromal cells` = "#F08080",
+                                   `T cells` = "#FE902EFF", 
+                                   `Tgd` = "#FFEE33")
+
+heatmap.colfun <- microViz::heat_palette(
+                  palette = "Lisbon",
+                  breaks = 100,
+                  range = c(0,1),
+                  sym = FALSE,
+                  rev = FALSE)
+```
+
+### Import Data
+
+```{r, eval=FALSE}
+dir.create(params$output_fig, recursive=TRUE, showWarnings=FALSE)
+```
+
+
+```{r load-meta}
+metadata.df <- as.data.frame(data.table::fread("~/vincent_perez/data/scRNAseq_metadata_clean.csv"))
+names(metadata.df) <- janitor::make_clean_names(names(metadata.df))
+setnames(metadata.df, c("sample_id", "group"), c("SampleID", "Group"))
+metadata.df$SampleID <- as.character(metadata.df$SampleID)
+
+```
+
+```{r load-seurat}
+# seurat <- readRDS(params$seurat)
+# 
+# seurat@meta.data$Group = seurat@meta.data$SampleID
+# seurat@meta.data$Group[seurat@meta.data$SampleID %in% c("770128", "770163", "770226", "770227", "770264")] <- "RT"
+# seurat@meta.data$Group[seurat@meta.data$SampleID %in% c("770200", "770223", "770238","770271", "770279")] <- "Control"
+# seurat@meta.data$Group[seurat@meta.data$SampleID %in% c("770174", "770184", "770225","770216", "770267")] <- "RT_plus_CpG"
+# seurat@meta.data$Group[seurat@meta.data$SampleID %in% c("770240", "770224", "770231", "770203", "770232")] <- "CpG"
+# 
+# seurat@meta.data$sex = NA
+# 
+# seurat@meta.data$sex[seurat@meta.data$SampleID %in% unique(metadata.df$SampleID[which(metadata.df$sex == "F")])] <- "F"
+# seurat@meta.data$sex[seurat@meta.data$SampleID %in% unique(metadata.df$SampleID[which(metadata.df$sex == "M")])] <- "M"
+
+### Load from file
+seurat<-readRDS(file="~/vincent_perez/data/seurat_27May2022_0418UTC_10k_harmony.rds")
+
+```
+
+```{r}
+
+DimPlot(seurat, group.by="seurat_clusters") + 
+  theme_sara() 
+
+```
+
+```{r proportion-cells}
+sfull = as.data.table(seurat@meta.data) %>%
+  dplyr::group_by(SingleR_ImmGen) %>%
+  dplyr::summarise(n=n())
+
+ncells = sum(sfull$n)
+
+sfull = sfull %>%
+  dplyr::mutate(p = n/ncells)
+
+prop_plot <- sfull %>%
+  ggplot(., aes(x = reorder(SingleR_ImmGen, -p), y = p, fill = SingleR_ImmGen)) +
+  geom_col(color="black") + #position="fill"
+  scale_fill_manual(values=ref.cols$SingleR_ImmGen) +
+  theme_sara_90() +
+  theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11),
+                 legend.position="none") +
+  labs(y="Proportion")
+
+# ### Print to PDF
+# pdf(file = "~/vincent_perez/figures/Chang_cell_proportions.pdf",
+#     width = 8,
+#     height = 6
+#     )
+# prop_plot
+# dev.off()
+prop_plot
+```
+
+## PCA & Clustering [SKIP IF POSSIBLE]
+Since this is a subset of cells, PCA, clustering, and UMAP must all be re-calculated.
+First we re-find variable genes and re-scale data. I'm only using 2k features are there are fewer cells in this dataset
+
+```{r features}
+# seurat <- Seurat::FindVariableFeatures(seurat,
+#                                            selection.method="vst",
+#                                            nfeatures=params$variable_genes)
+# seurat <- Seurat::ScaleData(object = seurat,
+#                         verbose = TRUE)
+# seurat <- Seurat::RunPCA(seurat)
+
+```
+
+```{r elbowplot-pca}
+ElbowPlot(seurat, ndims = 20, reduction = "pca")
+```
+# Run Harmony [SKIP IF POSSIBLE]
+
+```{r runharmony, eval=FALSE}
+# options(repr.plot.height = 3, repr.plot.width = 6)
+# system.time(seurat %<>% RunHarmony("SampleID", theta = 2, plot_convergence = TRUE))
+# 
+# saveRDS(seurat, file.path(params$output_fig, "seurat_13July2023_0418UTC_10k_harmony.rds"))
+```
+
+To reduce technical errors present, ran the single-cell Seurat object through Harmony using the RunHarmony() function in R. Harmony was ran with a theta of 2 and all other parameters set to defaul. Harmy reference is (here)[https://www.nature.com/articles/s41592-019-0619-0]. 
+
+```{r plot-sample-harmony, fig.width=12}
+
+s <- lapply(names(seurat@reductions), function(x){
+  DimPlot(object = seurat, reduction = x, pt.size = .1, group.by = "SampleID") +
+    theme_sara() +
+    scale_color_manual(values=sample.cols) +
+    guides(col = guide_legend(ncol = 2, override.aes = list(size=2)))
+
+})
+
+s
+
+g <- lapply(names(seurat@reductions), function(x){
+  DimPlot(object = seurat, reduction = x, pt.size = .1, group.by = "Group") +
+    theme_sara() +
+    scale_color_manual(values=group.cols)
+
+})
+
+g
+```
+
+## Run Clustering on harmony set
+
+```{r cluster-umap}
+# seurat_harmony <- Seurat::RunUMAP(seurat, dims=1:30, reduction="harmony")
+# seurat_harmony <- Seurat::FindNeighbors(seurat_harmony, dims = 1:30, reduction="harmony")
+# 
+# seurat_harmony$Louvain2_0.15 <- NULL
+# seurat_harmony$Louvain2_0.2 <- NULL
+# seurat_harmony$Louvain2_0.5 <- NULL
+# seurat_harmony$Louvain2_0.8 <- NULL
+# seurat_harmony$Louvain2_1.1 <- NULL
+# seurat_harmony$Louvain2_1.4 <- NULL
+# seurat_harmony <- Seurat::FindClusters(seurat_harmony, algorithm=2, 
+#                            resolution=params$cluster_resolution,
+#                            verbose=TRUE)
+# saveRDS(seurat_harmony, "seurat_30May22_harmony_clusters.rds")
+
+seurat_harmony<-readRDS(file="~/vincent_perez/data/seurat_30May22_harmony_clusters.rds")
+```
+
+# Comparison 0.2 resolution
+
+## Distribution of whole population
+
+### In the whole dataset
+```{r}
+sfull = as.data.table(seurat_harmony@meta.data) %>%
+  dplyr::group_by(SingleR_ImmGen) %>%
+  dplyr::summarise(n=n())
+
+ncells = sum(sfull$n)
+
+sfull = sfull %>%
+  dplyr::mutate(p = n/ncells)
+
+p2 <- ggplot(data=sfull, aes(x=reorder(SingleR_ImmGen, -n), y=p, fill=SingleR_ImmGen))
+p2 <- p2 + geom_bar(stat="identity", color="black")
+p2 <- p2 + scale_fill_manual('', values=ref.cols$SingleR_ImmGen)
+p2 <- p2 + theme_sara_90() 
+p2 <- p2 + theme(axis.text=element_text(size=9), 
+                 axis.title.x = element_blank(), 
+                 axis.title.y=element_text(size=11),
+                 legend.position = 'none')
+p2 <- p2 + labs(y="Proportion of cells")
+p2
+```
+
+### Cell type perspective
+```{r, fig.width= 8}
+p2 <- DimPlot(object = seurat_harmony, reduction = "umap", pt.size = .1, group.by = "SingleR_ImmGen") +
+    theme_sara() +
+    scale_color_manual(values=ref.cols$SingleR_ImmGen) +
+    guides(col = guide_legend(override.aes = list(size=4)))
+
+### Print to PDF
+# pdf(file = "~/vincent_perez/Chang_UMAP.pdf",  
+#     width = 8,
+#     height = 6
+#     ) 
+p2
+# dev.off()
+# p2
+
+p2 <- DimPlot(object = seurat_harmony, reduction = "umap", pt.size = .1, 
+              group.by = "SingleR_ImmGen", label = TRUE, repel = TRUE) +
+    theme_sara() +
+    scale_color_manual(values=ref.cols$SingleR_ImmGen) # +
+    #NoLegend()
+
+### Print to PDF
+# pdf(file = "~/vincent_perez/Chang_UMAP_labeled.pdf",  
+#     width = 8,
+#     height = 6
+#     ) 
+p2
+# dev.off()
+# p2
+
+```
+
+### Sample perspective
+
+#### UMAPS
+```{r, fig.width= 12}
+p1 <- DimPlot(object = seurat, reduction = "umap", pt.size = .1, group.by = "SampleID") +
+    theme_sara() +
+    scale_color_manual(values=sample.cols) +
+    guides(col = guide_legend(ncol = 2, override.aes = list(size=2)))
+
+p1
+
+p2 <- DimPlot(object = seurat_harmony, reduction = "umap", pt.size = .1, group.by = "SampleID") +
+    theme_sara() +
+    scale_color_manual(values=sample.cols) +
+    guides(col = guide_legend(ncol = 2, override.aes = list(size=2)))
+
+p2
+
+```
+
+#### Barplots
+```{r, fig.width=8}
+
+meta.df <- as.data.table(seurat_harmony@meta.data) 
+
+meta.df[, .N, by=c("SampleID", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SampleID)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=sample.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+```
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat@meta.data) 
+
+metaBH[, .N, by=c("SampleID", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SampleID)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=sample.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+```
+
+### Group perspective
+
+```{r, fig.width= 8}
+p1 <- DimPlot(object = seurat, reduction = "umap", pt.size = .1, group.by = "Group") +
+    theme_sara() +
+    scale_color_manual(values=group.cols) +
+    guides(col = guide_legend(ncol = 1, override.aes = list(size=3)))
+p1
+
+p2 <- DimPlot(object = seurat_harmony, reduction = "umap", pt.size = .1, group.by = "Group") +
+    theme_sara() +
+    scale_color_manual(values=group.cols) +
+    guides(col = guide_legend(ncol = 1, override.aes = list(size=3)))
+
+p2
+
+```
+
+```{r, fig.width=8}
+
+dt <- meta.df[, .N, by=c("Group", "RNA_snn_res.0.2")]
+dt$total_cells <- dt$Group
+dt$total_cells <- gsub("RT$", "29159", dt$total_cells, perl=TRUE)
+dt$total_cells <- gsub("RT_plus_CpG", "27056", dt$total_cells)
+dt$total_cells <- gsub("Control", "19997", dt$total_cells)
+dt$total_cells <- gsub("CpG", "17881", dt$total_cells)
+dt$total_cells <- as.numeric(dt$total_cells)
+dt <- dt[, Proportion := N/total_cells]
+
+dt %>%
+dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(., aes(x=RNA_snn_res.0.2, y=Proportion, fill=Group)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=group.cols) +
+  labs(y = "Proportion", x = "") +
+  guides(fill = guide_legend(ncol = 5)) +
+  theme(legend.position="bottom")
+
+```
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat@meta.data) 
+
+metaBH[, .N, by=c("Group", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=Group)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=group.cols) +
+  labs(y = "Proportion") +
+  theme(legend.position="bottom")
+
+```
+
+### Cluster perspective
+```{r, fig.width= 8}
+
+p1 <- DimPlot(object = seurat, reduction = "umap", pt.size = .1, group.by = "Louvain2_0.2") +
+    theme_sara() 
+
+cols_cluster <- pals::polychrome(n=seurat_harmony[["RNA_snn_res.0.2"]] %>% pull() %>% levels() %>% length())
+names(cols_cluster) <- seurat_harmony[["RNA_snn_res.0.2"]] %>% pull() %>% levels()
+
+p2 <- DimPlot(object = seurat_harmony, reduction = "umap", pt.size = .1, group.by = "RNA_snn_res.0.2") +
+    theme_sara() +
+    guides(col = guide_legend(override.aes = list(size=4))) +
+    scale_color_manual(values=cols_cluster)
+
+p2
+```
+
+
+```{r, fig.width=8}
+
+meta.df <- as.data.table(seurat_harmony@meta.data) 
+
+meta.df[, .N, by=c("SingleR_ImmGen", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:22))) %>%
+  ggplot(., aes(x=RNA_snn_res.0.2, y=N, fill=SingleR_ImmGen)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=ref.cols[["SingleR_ImmGen"]]) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+```
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat@meta.data) 
+
+metaBH[, .N, by=c("SingleR_ImmGen", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SingleR_ImmGen)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=ref.cols[["SingleR_ImmGen"]]) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+```
+
+# B-cells barplots
+
+## Before harmony
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat@meta.data) %>%
+  dplyr::filter(SingleR_ImmGen == "B cells") %>%
+  dplyr::filter(Louvain2_0.2 %in% c(as.character(11)))
+
+metaBH[, .N, by=c("SampleID", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(11:13))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SampleID)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=sample.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+metaBH[, .N, by=c("Group", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=Group)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=group.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 1))
+
+
+metaBH <- as.data.table(seurat@meta.data) %>%
+  dplyr::filter(Louvain2_0.2 %in% c(as.character(11:13)))
+
+metaBH[, .N, by=c("SingleR_ImmGen", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SingleR_ImmGen)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=ref.cols[["SingleR_ImmGen"]][which(names(ref.cols[["SingleR_ImmGen"]]) %in% metaBH$SingleR_ImmGen)]) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+
+
+```
+
+## After harmony
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat_harmony@meta.data) %>%
+  dplyr::filter(SingleR_ImmGen == "B cells") %>%
+  dplyr::filter(RNA_snn_res.0.2 %in% c(as.character(11)))
+
+metaBH[, .N, by=c("SampleID", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SampleID)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=sample.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+metaBH[, .N, by=c("Group", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=Group)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=group.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 1))
+
+
+metaBH <- as.data.table(seurat_harmony@meta.data) %>%
+  dplyr::filter(RNA_snn_res.0.2 %in% as.character(c(11,12,5,3)))
+
+metaBH[, .N, by=c("SingleR_ImmGen", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SingleR_ImmGen)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=ref.cols[["SingleR_ImmGen"]][which(names(ref.cols[["SingleR_ImmGen"]]) %in% metaBH$SingleR_ImmGen)]) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+
+
+```
+
+# T-cells barplots
+
+## Before harmony
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat@meta.data) %>%
+  dplyr::filter(SingleR_ImmGen == "T cells") %>%
+  dplyr::filter(Louvain2_0.2 %in% as.character(c(7,5)))
+
+metaBH[, .N, by=c("SampleID", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SampleID)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=sample.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+metaBH[, .N, by=c("Group", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=Group)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=group.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 1))
+
+
+metaBH <- as.data.table(seurat@meta.data) %>%
+  dplyr::filter(Louvain2_0.2 %in% as.character(c(7,5)))
+
+metaBH[, .N, by=c("SingleR_ImmGen", "Louvain2_0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(Louvain2_0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SingleR_ImmGen)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=ref.cols[["SingleR_ImmGen"]][which(names(ref.cols[["SingleR_ImmGen"]]) %in% metaBH$SingleR_ImmGen)]) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+
+
+```
+
+## After harmony
+
+```{r, fig.width=8}
+
+metaBH <- as.data.table(seurat_harmony@meta.data) %>%
+  dplyr::filter(SingleR_ImmGen == "T cells") %>%
+  dplyr::filter(RNA_snn_res.0.2 %in% as.character(c(2)))
+
+metaBH[, .N, by=c("SampleID", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SampleID)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=sample.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+metaBH[, .N, by=c("Group", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=Group)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=group.cols) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 1))
+
+
+metaBH <- as.data.table(seurat_harmony@meta.data) %>%
+  dplyr::filter(RNA_snn_res.0.2 %in% as.character(c(2,5,7)))
+
+metaBH[, .N, by=c("SingleR_ImmGen", "RNA_snn_res.0.2")] %>%
+  dplyr::mutate(RNA_snn_res.0.2 = factor(RNA_snn_res.0.2, levels = as.character(0:15))) %>%
+  ggplot(.,aes(x=RNA_snn_res.0.2, y=N, fill=SingleR_ImmGen)) + 
+  geom_col(position="fill", color="black") + 
+  theme_sara() +
+  scale_fill_manual("", values=ref.cols[["SingleR_ImmGen"]][which(names(ref.cols[["SingleR_ImmGen"]]) %in% metaBH$SingleR_ImmGen)]) +
+  labs(y = "Proportion") +
+  guides(fill = guide_legend(ncol = 2))
+
+
+
+```
